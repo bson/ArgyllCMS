@@ -1,0 +1,971 @@
+
+/* 
+ * iccgamut
+ *
+ * Produce color surface gamut of an ICC profile.
+ *
+ * Author:  Graeme W. Gill
+ * Date:    19/3/00
+ * Version: 1.00
+ *
+ * Copyright 2000 Graeme W. Gill
+ * All rights reserved.
+ * This material is licenced under the GNU AFFERO GENERAL PUBLIC LICENSE Version 3 :-
+ * see the License.txt file for licencing details.
+ */
+
+
+/*
+ * TTBD:
+ *       To support CIACAM02 properly, need to cope with viewing parameters ?
+ */
+
+#define SURFACE_ONLY
+#define GAMRES 10.0		/* Default surface resolution */
+
+#define USE_CAM_CLIP_OPT		/* Use CAM space to clip in */
+
+#define RGBRES 33	/* 33 */
+#define CMYKRES 17	/* 17 */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <fcntl.h>
+#include <string.h>
+#include <math.h>
+#include "copyright.h"
+#include "aconfig.h"
+#include "numlib.h"
+#include "icc.h"
+#include "conv.h"
+#include "xicc.h"
+#include "gamut.h"
+#include "counters.h"
+#include "vrml.h"
+
+static void face_plot(icxLuBase *luo, double gamres, int doaxes, double trans, char *outname);
+
+void usage(char *diag) {
+	int i;
+	fprintf(stderr,"Create ICC profile Lab/Jab gamut & plot Version %s\n",ARGYLL_VERSION_STR);
+	fprintf(stderr,"Author: Graeme W. Gill, licensed under the AGPL Version 3\n");
+	fprintf(stderr,"usage: iccgamut [options] profile\n");
+	if (diag != NULL)
+		fprintf(stderr,"Diagnostic: %s\n",diag);
+	fprintf(stderr," -v            Verbose\n");
+	fprintf(stderr," -d sres       Surface resolution details 1.0 - 50.0\n");
+	fprintf(stderr," -w            emit %s %s file as well as CGATS .gam file\n",vrml_format(),vrml_ext());
+	fprintf(stderr," -n            Don't add %s axes or white/black point\n",vrml_format());
+	fprintf(stderr," -k            Add %s markers for prim. & sec. \"cusp\" points\n",vrml_format());
+	fprintf(stderr,"               (Set env. ARGYLL_3D_DISP_FORMAT to VRML, X3D or X3DOM to change format)\n");
+	fprintf(stderr," -e            Create %s edge plot\n",vrml_format());
+	fprintf(stderr," -E            Create %s all possible edge plot\n",vrml_format());
+	fprintf(stderr," -F            Create %s face plot\n",vrml_format());
+	fprintf(stderr," -f function   f = forward*, b = backwards\n");
+	fprintf(stderr," -i intent     p = perceptual, r = relative colorimetric,\n");
+	fprintf(stderr,"               s = saturation, a = absolute (default), d = profile default\n");
+//  fprintf(stderr,"               P = absolute perceptual, S = absolute saturation\n");
+	fprintf(stderr," -p oride      l = Lab_PCS (default), j = %s Appearance Jab\n",icxcam_description(cam_default));
+	fprintf(stderr," -o order      n = normal (priority: lut > matrix > monochrome)\n");
+	fprintf(stderr,"               r = reverse (priority: monochrome > matrix > lut)\n");
+	fprintf(stderr," -l tlimit     set total ink limit, 0 - 400%% (estimate by default)\n");
+	fprintf(stderr," -L klimit     set black ink limit, 0 - 100%% (estimate by default)\n");
+	fprintf(stderr," -c viewcond   set viewing conditions for %s,\n",icxcam_description(cam_default));
+	fprintf(stderr,"               either an enumerated choice, or a series of parameter:value changes\n");
+	for (i = 0; ; i++) {
+		icxViewCond vc;
+		if (xicc_enum_viewcond(NULL, &vc, i, NULL, 1, NULL) == -999)
+			break;
+
+		fprintf(stderr,"           %s\n",vc.desc);
+	}
+	fprintf(stderr,"         s:surround    n = auto, a = average, m = dim, d = dark,\n");
+	fprintf(stderr,"                       c = transparency (default average)\n");
+	fprintf(stderr,"         w:X:Y:Z       Adapted white point as XYZ (default media white)\n");
+	fprintf(stderr,"         w:x:y         Adapted white point as x, y\n");
+	fprintf(stderr,"         a:adaptation  Adaptation luminance in cd.m^2 (default 50.0)\n");
+	fprintf(stderr,"         b:background  Background %% of image luminance (default 20)\n");
+	fprintf(stderr,"         l:imagewhite  Image white in cd.m^2 if surround = auto (default 250)\n");
+	fprintf(stderr,"         f:flare       Flare light %% of image luminance (default 0)\n");
+	fprintf(stderr,"         g:glare       Flare light %% of ambient (default %d)\n",XICC_DEFAULT_GLARE);
+	fprintf(stderr,"         g:X:Y:Z       Flare color as XYZ (default media white, Abs: D50)\n");
+	fprintf(stderr,"         g:x:y         Flare color as x, y\n");
+	fprintf(stderr,"         h:hkscale     Helmholtz-Kohlrausch effect scale factor (default 1.0)\n");
+	fprintf(stderr,"         m:mtaf        Mid-tone partial adaptation factor (default 0.0)\n");
+	fprintf(stderr,"         m:X:Y:Z       Mid-tone Adaptation white as XYZ (default D50)\n");
+	fprintf(stderr,"         m:x:y         Mid-tone Adaptation white as x, y\n");
+    fprintf(stderr," -x pcent      Expand/compress gamut cylindrically by percent\n");
+	fprintf(stderr,"\n");
+	exit(1);
+}
+
+int
+main(int argc, char *argv[]) {
+	int fa,nfa;				/* argument we're looking at */
+	static char prof_name[MAXNAMEL+1];
+	static char *xl, out_name[MAXNAMEL+4+1];
+	icmFile *fp;
+	icc *icco;
+	icmErr err = { 0, { '\000'} };
+	xicc *xicco;
+	gamut *gam;
+	int verb = 0;
+	int rv = 0;
+	int dovrml = 0;
+	int doaxes = 1;
+	int docusps = 0;
+	double gamres = 0;			/* Surface resolution */
+	int doedgepl = 0;			/* Create edge plot */
+	int dofacepl = 0;			/* Create face plot */
+	int special = 0;			/* Special surface plot */
+	int fl = 0;					/* luobj flags */
+	icxInk ink;					/* Ink parameters */
+	int tlimit = -1;			/* Total ink limit as a % */
+	int klimit = -1;			/* Black ink limit as a % */
+	icxViewCond vc;				/* Viewing Condition for CIECAM */
+	int vc_e = -1;				/* Enumerated viewing condition */
+	int vc_s = -1;				/* Surround override */
+	double vc_wXYZ[3] = {-1.0, -1.0, -1.0};	/* Adapted white override in XYZ */
+	double vc_wxy[2] = {-1.0, -1.0};		/* Adapted white override in x,y */
+	double vc_a = -1.0;			/* Adapted luminance */
+	double vc_b = -1.0;			/* Background % overide */
+	double vc_l = -1.0;			/* Scene luminance override */
+	double vc_f = -1.0;			/* Flare % overide */
+	double vc_g = -1.0;			/* Glare % overide */
+	double vc_gXYZ[3] = {-1.0, -1.0, -1.0};	/* Glare color override in XYZ */
+	double vc_gxy[2] = {-1.0, -1.0};		/* Glare color override in x,y */
+	double vc_hkscale = -1.0;			/* HK scaling factor */
+	double vc_mtaf = -1.0;		/* Mid tone partial adapation factor from Wxyz to Wxyz2 */ 
+	double vc_Wxyz2[3] = {-1.0, -1.0, -1.0};	/* Adapted white override in XYZ */
+	double expand = 1.0;		/* Expand gamut cylindrically */
+
+	icxLuBase *luo;
+
+	/* Lookup parameters */
+	icmLookupFunc     func   = icmFwd;				/* Default */
+	icRenderingIntent intent = -1;					/* Default */
+	icColorSpaceSignature pcsor = icSigLabData;		/* Default */
+	icmLookupOrder    order  = icmLuOrdNorm;		/* Default */
+	
+
+	error_program = argv[0];
+
+	if (argc < 2)
+		usage("Too few parameters");
+
+	/* Process the arguments */
+	for (fa = 1;fa < argc;fa++) {
+		nfa = fa;					/* skip to nfa if next argument is used */
+		if (argv[fa][0] == '-')	{	/* Look for any flags */
+			char *na = NULL;		/* next argument after flag, null if none */
+
+			if (argv[fa][2] != '\000')
+				na = &argv[fa][2];		/* next is directly after flag */
+			else {
+				if ((fa+1) < argc) {
+					if (argv[fa+1][0] != '-') {
+						nfa = fa + 1;
+						na = argv[nfa];		/* next is seperate non-flag argument */
+					}
+				}
+			}
+
+			if (argv[fa][1] == '?')
+				usage(NULL);
+
+			/* function */
+			else if (argv[fa][1] == 'f') {
+				fa = nfa;
+				if (na == NULL) usage("No parameter after flag -f");
+    			switch (na[0]) {
+					case 'f':
+					case 'F':
+						func = icmFwd;
+						break;
+					case 'b':
+					case 'B':
+						func = icmBwd;
+						break;
+					default:
+						usage("Unrecognised parameter after flag -f");
+				}
+			}
+
+			/* Intent */
+			else if (argv[fa][1] == 'i') {
+				fa = nfa;
+				if (na == NULL) usage("No parameter after flag -i");
+    			switch (na[0]) {
+					case 'd':
+						intent = icmDefaultIntent;
+						break;
+					case 'a':
+						intent = icAbsoluteColorimetric;
+						break;
+					case 'p':
+						intent = icPerceptual;
+						break;
+					case 'r':
+						intent = icRelativeColorimetric;
+						break;
+					case 's':
+						intent = icSaturation;
+						break;
+					/* Argyll special intents to check spaces underlying */
+					/* icxPerceptualAppearance & icxSaturationAppearance */
+					case 'P':
+						intent = icmAbsolutePerceptual;
+						break;
+					case 'S':
+						intent = icmAbsoluteSaturation;
+						break;
+					default:
+						usage("Unrecognised parameter after flag -i");
+				}
+			}
+
+			/* Search order */
+			else if (argv[fa][1] == 'o') {
+				fa = nfa;
+				if (na == NULL) usage("No parameter after flag -o");
+    			switch (na[0]) {
+					case 'n':
+					case 'N':
+						order = icmLuOrdNorm;
+						break;
+					case 'r':
+					case 'R':
+						order = icmLuOrdRev;
+						break;
+					default:
+						usage("Unrecognised parameter after flag -o");
+				}
+			}
+
+			/* PCS override */
+			else if (argv[fa][1] == 'p') {
+				fa = nfa;
+				if (na == NULL) usage("No parameter after flag -p");
+    			switch (na[0]) {
+					case 'l':
+						pcsor = icSigLabData;
+						break;
+					case 'j':
+						pcsor = icxSigJabData;
+						break;
+					default:
+						usage("Unrecognised parameter after flag -p");
+				}
+			}
+
+			/* Verbosity */
+			else if (argv[fa][1] == 'v') {
+				verb = 1;
+			}
+			/* VRML output */
+			else if (argv[fa][1] == 'w') {
+				dovrml = 1;
+			}
+			/* No axis output in vrml */
+			else if (argv[fa][1] == 'n') {
+				doaxes = 0;
+			}
+			/* Do cusp markers in vrml */
+			else if (argv[fa][1] == 'k') {
+				docusps = 1;
+			}
+			/* Edge plot */
+			else if (argv[fa][1] == 'e')
+				doedgepl = 1;
+			else if (argv[fa][1] == 'E')
+				doedgepl = 2;
+
+			/* Face plot */
+			else if (argv[fa][1] == 'F')
+				dofacepl = 1;
+
+			/* Special */
+			else if (argv[fa][1] == 's') {
+				special = 1;
+			}
+			/* Ink limit */
+			else if (argv[fa][1] == 'l') {
+				fa = nfa;
+				if (na == NULL) usage("No parameter after flag -l");
+				tlimit = atoi(na);
+			}
+
+			else if (argv[fa][1] == 'L') {
+				fa = nfa;
+				if (na == NULL) usage("No parameter after flag -L");
+				klimit = atoi(na);
+			}
+
+
+			/* Surface Detail */
+			else if (argv[fa][1] == 'd') {
+				fa = nfa;
+				if (na == NULL) usage("No parameter after flag -d");
+				gamres = atof(na);
+				if (gamres < 0.1 || gamres > 50.0)
+					usage("Parameter after flag -d seems out of range");
+			}
+
+			/* Expand gamut cylindrically */
+			else if (argv[fa][1] == 'x') {
+				double rr;
+				fa = nfa;
+				if (na == NULL) usage("No parameter after flag -x");
+				rr = atof(na)/100.0;
+
+				if (rr < 0.01 || rr > 100.0)
+					usage("-x ratio is out of range");
+				expand = rr;
+			}
+
+			/* Viewing conditions */
+			else if (argv[fa][1] == 'c') {
+				fa = nfa;
+				if (na == NULL) usage("No parameter after flag -c");
+#ifdef NEVER
+				if (na[0] >= '0' && na[0] <= '9') {
+					vc_e = atoi(na);
+				} else
+#endif
+				if (na[1] != ':') {
+					if ((vc_e = xicc_enum_viewcond(NULL, NULL, -2, na, 1, NULL)) == -999)
+						usage("Urecognised Enumerated Viewing conditions");
+				} else if (na[0] == 's' || na[0] == 'S') {
+					if (na[1] != ':')
+						usage("Unrecognised parameters after -cs");
+					if (na[2] == 'n' || na[2] == 'N') {
+						vc_s = vc_none;		/* Automatic from Lv */
+					} else if (na[2] == 'a' || na[2] == 'A') {
+						vc_s = vc_average;
+					} else if (na[2] == 'm' || na[2] == 'M') {
+						vc_s = vc_dim;
+					} else if (na[2] == 'd' || na[2] == 'D') {
+						vc_s = vc_dark;
+					} else if (na[2] == 'c' || na[2] == 'C') {
+						vc_s = vc_cut_sheet;
+					} else
+						usage("Unrecognised parameters after -cs:");
+				} else if (na[0] == 'w' || na[0] == 'W') {
+					double x, y, z;
+					if (sscanf(na+1,":%lf:%lf:%lf",&x,&y,&z) == 3) {
+						vc_wXYZ[0] = x; vc_wXYZ[1] = y; vc_wXYZ[2] = z;
+					} else if (sscanf(na+1,":%lf:%lf",&x,&y) == 2) {
+						vc_wxy[0] = x; vc_wxy[1] = y;
+					} else
+						usage("Unrecognised parameters after -cw");
+				} else if (na[0] == 'a' || na[0] == 'A') {
+					if (na[1] != ':')
+						usage("Unrecognised parameters after -ca");
+					vc_a = atof(na+2);
+				} else if (na[0] == 'b' || na[0] == 'B') {
+					if (na[1] != ':')
+						usage("Unrecognised parameters after -cb");
+					vc_b = atof(na+2);
+				} else if (na[0] == 'l' || na[0] == 'L') {
+					if (na[1] != ':')
+						usage("Viewing conditions (-cl) missing ':'");
+					vc_l = atof(na+2);
+				} else if (na[0] == 'f' || na[0] == 'F') {
+					if (na[1] != ':')
+						usage("Viewing conditions (-cf) missing ':'");
+					vc_f = atof(na+2);
+				} else if (na[0] == 'g' || na[0] == 'G') {
+					double x, y, z;
+					if (sscanf(na+1,":%lf:%lf:%lf",&x,&y,&z) == 3) {
+						vc_gXYZ[0] = x; vc_gXYZ[1] = y; vc_gXYZ[2] = z;
+					} else if (sscanf(na+1,":%lf:%lf",&x,&y) == 2) {
+						vc_gxy[0] = x; vc_gxy[1] = y;
+					} else if (sscanf(na+1,":%lf",&x) == 1) {
+						vc_g = x;
+					} else
+						usage("Unrecognised parameters after -cg");
+				} else if (na[0] == 'h' || na[0] == 'H') {
+					if (na[1] != ':')
+						usage("Unrecognised parameters after -ch");
+					vc_hkscale = atof(na+2);
+				} else if (na[0] == 'm' || na[0] == 'M') {
+					double x, y, z;
+					if (sscanf(na+1,":%lf:%lf:%lf",&x,&y,&z) == 3) {
+						vc_Wxyz2[0] = x; vc_Wxyz2[1] = y; vc_Wxyz2[2] = z;
+					} else if (sscanf(na+1,":%lf:%lf",&x,&y) == 2) {
+						vc_Wxyz2[0] = x; vc_Wxyz2[1] = y; vc_Wxyz2[2] = -1;
+					} else if (sscanf(na+1,":%lf",&x) == 1) {
+						vc_mtaf = x;
+					} else
+						usage("Unrecognised parameters after -cm");
+				} else
+					usage("Unrecognised parameters after -c");
+
+				/* Make sure we output perceptual space */
+				pcsor = icxSigJabData;
+			}
+			else 
+				usage("Unknown flag");
+		} else
+			break;
+	}
+
+
+	if (intent == -1) {
+		if (pcsor == icxSigJabData)
+			intent = icRelativeColorimetric;	/* Default to icxAppearance */
+		else
+			intent = icAbsoluteColorimetric;	/* Default to icAbsoluteColorimetric */
+	}
+
+	if (fa >= argc || argv[fa][0] == '-') usage("Expected profile name");
+	strncpy(prof_name, argv[fa],MAXNAMEL); prof_name[MAXNAMEL] = '\000';
+
+	/* Open up the profile for reading */
+	if ((fp = new_icmFileStd_name(&err, prof_name,"r")) == NULL)
+		error ("Can't open file '%s' (0x%x, '%s')",prof_name,err.c,err.m);
+
+	if ((icco = new_icc(&err)) == NULL)
+		error ("Creation of ICC object failed (0x%x, '%s')",err.c,err.m);
+
+	if ((rv = icco->read(icco,fp,0)) != 0)
+		error ("%d, %s",rv,icco->e.m);
+
+	if (verb) {
+		icmFile *op;
+		if ((op = new_icmFileStd_fp(&err, stdout)) == NULL)
+			error ("Can't open stdout (0x%x, '%s')",err.c,err.m);
+		icco->header->dump(icco->header, op, 1);
+		op->del(op);
+	}
+
+	/* Wrap with an expanded icc */
+	if ((xicco = new_xicc(icco)) == NULL)
+		error ("Creation of xicc failed");
+
+	/* Set the ink limits */
+	icxDefaultLimits(xicco, &ink.tlimit, tlimit/100.0, &ink.klimit, klimit/100.0);
+
+	if (verb) {
+		if (ink.tlimit >= 0.0)
+			printf("Total ink limit assumed is %3.0f%%\n",100.0 * ink.tlimit);
+		if (ink.klimit >= 0.0)
+			printf("Black ink limit assumed is %3.0f%%\n",100.0 * ink.klimit);
+	}
+
+	/* Setup a safe ink generation (not used) */
+	ink.KonlyLmin = 0;		/* Use normal black Lmin for locus */
+	ink.k_rule = icxKluma5k;
+	ink.c.Ksmth = ICXINKDEFSMTH;	/* Default smoothing */
+	ink.c.Kskew = ICXINKDEFSKEW;	/* default curve skew */
+	ink.c.Kstle = 0.0;		/* Min K at white end */
+	ink.c.Kstpo = 0.0;		/* Start of transition is at white */
+	ink.c.Kenle = 1.0;		/* Max K at black end */
+	ink.c.Kenpo = 1.0;		/* End transition at black */
+	ink.c.Kshap = 1.0;		/* Linear transition */
+
+	/* Setup the default viewing conditions */
+	if (xicc_enum_viewcond(xicco, &vc, -1, NULL, 0, NULL) == -2)
+		error ("%d, %s",xicco->e.c, xicco->e.m);
+
+	if (vc_e != -1)
+		if (xicc_enum_viewcond(xicco, &vc, vc_e, NULL, 0, NULL) == -2)
+			error ("%d, %s",xicco->e.c, xicco->e.m);
+	if (vc_s >= 0)
+		vc.Ev = vc_s;
+	if (vc_wXYZ[1] > 0.0) {
+		/* Normalise it to current media white */
+		vc.Wxyz[0] = vc_wXYZ[0]/vc_wXYZ[1] * vc.Wxyz[1];
+		vc.Wxyz[2] = vc_wXYZ[2]/vc_wXYZ[1] * vc.Wxyz[1];
+	} 
+	if (vc_wxy[0] >= 0.0) {
+		double x = vc_wxy[0];
+		double y = vc_wxy[1];	/* If Y == 1.0, then X+Y+Z = 1/y */
+		double z = 1.0 - x - y;
+		vc.Wxyz[0] = x/y * vc.Wxyz[1];
+		vc.Wxyz[2] = z/y * vc.Wxyz[1];
+	}
+	if (vc_a >= 0.0)
+		vc.La = vc_a;
+	if (vc_b >= 0.0)
+		vc.Yb = vc_b/100.0;
+	if (vc_l >= 0.0)
+		vc.Lv = vc_l;
+	if (vc_f >= 0.0)
+		vc.Yf = vc_f/100.0;
+	if (vc_g >= 0.0)
+		vc.Yg = vc_g/100.0;
+	if (vc_gXYZ[1] > 0.0) {
+		/* Normalise it to current media white */
+		vc.Gxyz[0] = vc_gXYZ[0]/vc_gXYZ[1] * vc.Gxyz[1];
+		vc.Gxyz[2] = vc_gXYZ[2]/vc_gXYZ[1] * vc.Gxyz[1];
+	}
+	if (vc_gxy[0] >= 0.0) {
+		double x = vc_gxy[0];
+		double y = vc_gxy[1];	/* If Y == 1.0, then X+Y+Z = 1/y */
+		double z = 1.0 - x - y;
+		vc.Gxyz[0] = x/y * vc.Gxyz[1];
+		vc.Gxyz[2] = z/y * vc.Gxyz[1];
+	}
+	if (vc_hkscale >= 0.0)
+		vc.hkscale = vc_hkscale;
+	if (vc_mtaf >= 0.0)
+		vc.mtaf = vc_mtaf;
+	if (vc_Wxyz2[0] >= 0.0 && vc_Wxyz2[1] > 0.0 && vc_Wxyz2[2] >= 0.0) {
+		/* Normalise XYZ */
+		vc.Wxyz2[0] = vc_Wxyz2[0]/vc_Wxyz2[1] * vc.Wxyz2[1];
+		vc.Wxyz2[2] = vc_Wxyz2[2]/vc_Wxyz2[1] * vc.Wxyz2[1];
+	}
+	if (vc_Wxyz2[0] >= 0.0 && vc_Wxyz2[1] >= 0.0 && vc_Wxyz2[2] < 0.0) {
+		/* Convert Yxy to XYZ */
+		double x = vc_Wxyz2[0];
+		double y = vc_Wxyz2[1];	/* If Y == 1.0, then X+Y+Z = 1/y */
+		double z = 1.0 - x - y;
+		vc.Wxyz2[0] = x/y * vc.Wxyz2[1];
+		vc.Wxyz2[2] = z/y * vc.Wxyz2[1];
+	}
+
+	fl |= ICX_CLIP_NEAREST;		/* Don't setup rev uncessarily */
+
+#ifdef USE_CAM_CLIP_OPT
+	 fl |= ICX_CAM_CLIP;
+#endif
+
+#ifdef NEVER
+	printf("~1 output space flags = 0x%x\n",fl);
+	printf("~1 output space intent = %s\n",icx2str(icmRenderingIntent,intent));
+	printf("~1 output space pcs = %s\n",icx2str(icmColorSpaceSig,pcsor));
+	printf("~1 output space viewing conditions =\n"); xicc_dump_viewcond(&vc);
+	printf("~1 output space inking =\n"); xicc_dump_inking(&ink);
+#endif
+
+	strcpy(out_name, prof_name);
+	if ((xl = strrchr(out_name, '.')) == NULL)	/* Figure where extention is */
+		xl = out_name + strlen(out_name);
+
+	strcpy(xl,".gam");
+
+	/* Get a expanded color conversion object */
+	if ((luo = xicco->get_luobj(xicco, fl, func, intent, pcsor, order, &vc, &ink)) == NULL)
+		error ("%d, %s",xicco->e.c, xicco->e.m);
+
+
+	{
+		double gres = gamres;
+
+		if (gres == 0.0)
+			gres = GAMRES;
+
+		/* Creat a gamut surface */
+		if ((gam = luo->get_gamut(luo, gres)) == NULL)
+			error ("%d, %s",xicco->e.c, xicco->e.m);
+
+		if (verb) {
+			double cs_wp[3], cs_bp[3];
+			double ga_wp[3], ga_bp[3];
+
+			if (gam->getwb(gam, cs_wp, cs_bp, NULL, ga_wp, ga_bp, NULL)) {
+				fprintf(stderr,"gamut map: Unable to read gamut white and black points\n");
+			} else {
+				printf(" Colorspace white/black are %f %f %f, %f %f %f\n",
+				cs_wp[0], cs_wp[1], cs_wp[2], cs_bp[0], cs_bp[1], cs_bp[2]);
+	
+				printf(" Gamut white/black are      %f %f %f, %f %f %f\n\n",
+				ga_wp[0], ga_wp[1], ga_wp[2], ga_bp[0], ga_bp[1], ga_bp[2]);
+			}
+		}
+
+		/* Expand gamut cylindrically */
+		if (expand != 1.0) {
+			gamut *xgam;
+
+			if ((xgam = new_gamut(1.0, 0, 0)) == NULL
+			 || xgam->exp_cyl(xgam, gam, expand)) {
+				error ("Creating expanded gamut failed");
+			}
+
+			gam->del(gam);
+			gam = xgam;
+		}
+
+		if (gam->write_gam(gam, out_name))
+			error ("write gamut failed on '%s'",out_name);
+
+		if (dovrml) {
+			xl[0] = '\000';			/* remove extension */
+			if (gam->write_vrml(gam,out_name, doaxes, docusps))
+				error ("write vrml failed on '%s%s'",out_name, vrml_ext());
+		}
+
+		if (verb) {
+			printf("Total volume of gamut is %f cubic colorspace units\n",gam->volume(gam));
+		}
+		gam->del(gam);
+	}
+
+	/* Create separate plot of edges */
+	if (doedgepl == 1) {
+		vrml *wrl = NULL;
+		char *xl, edge_name[MAXNAMEL+1];
+		int docusps = 1;
+		double in[MAX_CHAN], out[MAX_CHAN];
+		int devn;
+		double gres = gamres;
+
+		int lres;
+		int cc, i, j;
+
+		if (gres <= 0.0)
+			gres = 5.0;
+
+		lres = (int)(100.0/gres + 0.5);
+		if (lres < 1)
+			lres = 1;
+
+		strcpy(edge_name, prof_name);
+		if ((xl = strrchr(edge_name, '.')) == NULL)	/* Figure where extention is */
+			xl = edge_name + strlen(edge_name);
+		strcpy(xl,"_e");
+
+		luo->spaces(luo, NULL, &devn, NULL, NULL, NULL, NULL, NULL, NULL); 
+
+		wrl = new_vrml(edge_name, doaxes, vrml_lab);
+
+		/* For all verticies minus one dimension */
+		for (cc = 0; cc < (1 << (devn-1)); cc++) {
+
+			/* For the other dimension being each channel */
+			for (i = 0; i < devn; i++) {
+				int ii, mm;
+
+				/* Set static input values */
+				for (mm = 1, ii = 0; ii < devn; ii++) {
+					if (i == ii)
+						continue;	/* Skip channel we're going to step along */
+					if (cc & mm)
+						in[ii] = 1.0;
+					else
+						in[ii] = 0.0;
+					mm <<= 1;
+				}
+
+				wrl->start_line_set(wrl, 0);
+
+				/* Step along the edge */
+				for (j = 0; j < lres; j++) {
+					in[i] = j/(lres-1.0);
+
+					luo->lookup(luo, out, in);
+
+					wrl->add_vertex(wrl, 0, out);
+				}
+				wrl->make_last_vertex(wrl, 0);
+				wrl->make_lines(wrl, 0, 0);
+			}
+		}
+		wrl->del(wrl);
+
+	/* All possible edges */
+	} else if (doedgepl == 2) {
+		vrml *wrl = NULL;
+		char *xl, edge_name[MAXNAMEL+1];
+		int docusps = 1;
+		double in[MAX_CHAN], out[MAX_CHAN];
+		int devn;
+		double gres = gamres;
+
+		int lres;
+		int c1, c2, i, j;
+
+		if (gres <= 0.0)
+			gres = 5.0;
+
+		lres = (int)(100.0/gres + 0.5);
+		if (lres < 1)
+			lres = 1;
+
+		strcpy(edge_name, prof_name);
+		if ((xl = strrchr(edge_name, '.')) == NULL)	/* Figure where extention is */
+			xl = edge_name + strlen(edge_name);
+		strcpy(xl,"_e");
+
+		luo->spaces(luo, NULL, &devn, NULL, NULL, NULL, NULL, NULL, NULL); 
+
+		wrl = new_vrml(edge_name, doaxes, vrml_lab);
+
+		/* For all verticies */
+		for (c1 = 0; c1 < (1 << devn)-1; c1++) {
+
+			/* For all other verticies */
+			for (c2 = c1 + 1; c2 < (1 << devn); c2++) {
+				double p1[MAX_CHAN], p2[MAX_CHAN];
+				int ii, mm;
+
+				/* Set static input values */
+				for (mm = 1, ii = 0; ii < devn; ii++) {
+					if (c1 & mm)
+						p1[ii] = 1.0;
+					else
+						p1[ii] = 0.0;
+					if (c2 & mm)
+						p2[ii] = 1.0;
+					else
+						p2[ii] = 0.0;
+					mm <<= 1;
+				}
+
+				wrl->start_line_set(wrl, 0);
+
+				/* Step along the edge */
+				for (j = 0; j < lres; j++) {
+					double bl = j/(lres-1.0);
+
+					vect_blend(in, p1, p2, bl, devn);
+
+					luo->lookup(luo, out, in);
+
+					wrl->add_vertex(wrl, 0, out);
+				}
+				wrl->make_last_vertex(wrl, 0);
+				wrl->make_lines(wrl, 0, 0);
+			}
+		}
+		wrl->del(wrl);
+	}
+
+	if (dofacepl) {
+		vrml *wrl = NULL;
+		char *xl, face_name[MAXNAMEL+1];
+		double trans = 0.0;     /* Transparency */
+
+		if (gamres <= 0.0)
+			gamres = 20.0;
+
+		strcpy(face_name, prof_name);
+		if ((xl = strrchr(face_name, '.')) == NULL)	/* Figure where extention is */
+			xl = face_name + strlen(face_name);
+		strcpy(xl,"_f");
+
+		face_plot(luo, gamres, doaxes, trans, face_name);
+
+	}
+
+	luo->del(luo);			/* Done with lookup object */
+
+	xicco->del(xicco);		/* Expansion wrapper */
+	icco->del(icco);		/* Icc */
+	fp->del(fp);
+
+
+	return 0;
+}
+
+/* -------------------------------------------- */
+
+#define GAMUT_LCENT 50
+
+/* Create a face gamut, illustrating */
+/* device space "fold-over" */
+/* (This will be in the current PCS, but assumed to be Lab) */
+static void face_plot(
+icxLuBase *luo,
+double detail,		/* Gamut resolution detail */
+int doaxes,
+double trans,		/* Transparency */
+char *outname		/* Output VRML/X3D file (no extension) */
+) {
+	int i, j;
+	vrml *wrl;
+	int vix;						/* Vertex index */
+	int nix;						/* Node index */
+	int fix;
+	double col[MPP_MXCCOMB][3];		/* Color asigned to each major vertex */
+	int n, nn;
+	int res;
+	DCOUNT(coa, MAX_CHAN, 0, 0, 0, 2);
+
+	luo->spaces(luo, NULL, &n, NULL, NULL, NULL, NULL, NULL, NULL);
+
+	n = n;
+	nn = 1 << n;
+
+	coa_di = n;
+
+	/* Asign some colors to the combination nodes */
+	for (i = 0; i < nn; i++) {
+		int a, b, c, j;
+		double h;
+
+		j = (i ^ 0x5a5a5a5a) % nn;
+		h = (double)j/(nn-1);
+
+		/* Make fully saturated with chosen hue */
+		if (h < 1.0/3.0) {
+			a = 0;
+			b = 1;
+			c = 2;
+		} else if (h < 2.0/3.0) {
+			a = 1;
+			b = 2;
+			c = 0;
+			h -= 1.0/3.0;
+		} else {
+			a = 2;
+			b = 0;
+			c = 1;
+			h -= 2.0/3.0;
+		}
+		h *= 3.0;
+
+		col[i][a] = (1.0 - h);
+		col[i][b] = h;
+		col[i][c] = d_rand(0.0, 1.0);
+	}
+
+	if (detail > 0.0)
+		res = (int)(100.0/detail);	/* Establish an appropriate sampling density */
+	else
+		res = 4;
+
+	if (res < 2)
+		res = 2;
+
+	if ((wrl = new_vrml(outname, doaxes, vrml_lab)) == NULL)
+		error("new_vrml faile for file '%s%s'",outname,vrml_ext());
+
+	wrl->start_line_set(wrl, 0);
+
+	/* Itterate over all the faces in the device space */
+	/* generating the vertex positions. */
+	DC_INIT(coa);
+	vix = 0;
+	nix = 0;
+	fix = 0;
+	while(!DC_DONE(coa)) {
+		int e, m1, m2;
+		double in[MAX_CHAN];
+		double out[3];
+		double sum;
+		double xb, yb;
+
+		/* Scan only device surface */
+		for (m1 = 0; m1 < n; m1++) {
+			if (coa[m1] != 0)
+				continue;
+
+			for (m2 = m1 + 1; m2 < n; m2++) {
+				int x, y;
+				double fcol[3];
+
+				if (coa[m2] != 0)
+					continue;
+
+				for (sum = 0.0, e = 0; e < n; e++)
+					in[e] = (double)coa[e];		/* Base value */
+
+				fcol[0] = d_rand(0.0, 1.0);
+				fcol[1] = d_rand(0.0, 1.0);
+				fcol[2] = d_rand(0.0, 1.0);
+
+				fix++;
+
+				/* Scan over 2D device space face */
+				for (x = 0; x < res; x++) {				/* step over surface */
+					xb = in[m1] = x/(res - 1.0);
+					for (y = 0; y < res; y++) {
+						int v0, v1, v2, v3;
+						double rgb[3];
+						yb = in[m2] = y/(res - 1.0);
+
+						/* Lookup PCS value */
+						luo->lookup(luo, out, in);
+#ifdef NEVER
+						/* Create a color */
+						for (v0 = 0, e = 0; e < n; e++)
+							v0 |= coa[e] ? (1 << e) : 0;		/* Binary index */
+
+						v1 = v0 | (1 << m2);				/* Y offset */
+						v2 = v0 | (1 << m2) | (1 << m1);	/* X+Y offset */
+						v3 = v0 | (1 << m1);				/* Y offset */
+
+						/* Linear interp between the main vertices */
+						for (j = 0; j < 3; j++) {
+							rgb[j] = (1.0 - yb) * (1.0 - xb) * col[v0][j]
+							       +        yb  * (1.0 - xb) * col[v1][j]
+							       + (1.0 - yb) *        xb  * col[v3][j]
+							       +        yb  *        xb  * col[v2][j];
+						}
+						wrl->add_col_vertex(wrl, 0, out, rgb);
+#else
+						wrl->add_col_vertex(wrl, 0, out, fcol);
+#endif
+
+						vix++;
+					}
+				}
+			}
+		}
+		/* Increment index within block */
+		DC_INC(coa);
+		nix++;
+	}
+
+	/* Itterate over all the faces in the device space */
+	/* generating the quadrilateral indexes. */
+	DC_INIT(coa);
+	vix = 0;
+	while(!DC_DONE(coa)) {
+		int e, m1, m2;
+		double in[MAX_CHAN];
+		double sum;
+
+		/* Scan only device surface */
+		for (m1 = 0; m1 < n; m1++) {
+			if (coa[m1] != 0)
+				continue;
+
+			for (m2 = m1 + 1; m2 < n; m2++) {
+				int x, y;
+
+				if (coa[m2] != 0)
+					continue;
+
+				for (sum = 0.0, e = 0; e < n; e++)
+					in[e] = (double)coa[e];		/* Base value */
+
+				/* Scan over 2D device space face */
+				for (x = 0; x < res; x++) {				/* step over surface */
+					for (y = 0; y < res; y++) {
+
+						if (x < (res-1) && y < (res-1)) {
+							int ix[4];
+							/* Hmm. add both directions to avoid figuring orientation... */
+							ix[0] = vix;
+							ix[1] = vix + 1;
+							ix[2] = vix + 1 + res;
+							ix[3] = vix + res;
+							wrl->add_quad(wrl, 0, ix);
+							ix[0] = vix;
+							ix[1] = vix + res;
+							ix[2] = vix + 1 + res;
+							ix[3] = vix + 1;
+							wrl->add_quad(wrl, 0, ix);
+						}
+						vix++;
+					}
+				}
+			}
+		}
+		/* Increment index within block */
+		DC_INC(coa);
+	}
+	wrl->make_quads_vc(wrl, 0, trans);
+
+	if (wrl->flush(wrl) != 0)
+		error("Error closing output file '%s%s'",outname,vrml_ext());
+
+	wrl->del(wrl);
+}
+
+

@@ -1,0 +1,15 @@
+Readme.txt
+License4.txt
+afiles
+cgats.c
+cgats.h
+pars.c
+pars.h
+parsstd.c
+cgatsstd.c
+test.txt
+Jamfile
+Makefile
+Makefile.WNT
+Makefile.UNIX
+Makefile.OSX

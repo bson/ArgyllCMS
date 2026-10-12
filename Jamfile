@@ -1,0 +1,80 @@
+
+# Top level Argyll Jamfile. 
+
+# Overall optization state and configuration. Overrides sub-Jamfiles
+# See Jamtop and Jambase for other details.
+
+PREF_CCFLAGS 	+= $(CCOPTFLAG) ;		# Turn optimisation on
+#PREF_CCFLAGS	+= $(CCDEBUGFLAG) ;		# Debugging flags
+#PREF_CCFLAGS	+= $(CCHEAPDEBUG) ;		# Heap Debugging & Debugging flags
+#PREF_LINKFLAGS	+= $(LINKOPTFLAG) ;		# Link optimization flags
+PREF_LINKFLAGS	+= $(LINKDEBUGFLAG) ;	# Link debugging flags
+#PREF_CCFLAGS 	+= $(CCPROFFLAG) ;		# Profile flags
+#PREF_LINKFLAGS	+= $(LINKPROFFLAG) ;    # Profile flags
+
+if [ GLOB . : thirdparty_licenses.txt ] {
+	ExeDoc = thirdparty_licenses.txt ;
+	InstallFile bin : $(ExeDoc) ;
+}
+
+#Install
+InstallFile $(DESTDIR)$(PREFIX)/bin : com.argyllcms.metainfo.xml ;
+
+# Need compile date ?
+if $(NEED_COMPILE_DATE) = true && [ GLOB $(PATH) : awk awk.exe ] {
+	Always compiledate.h ;
+	GenFileNND compiledate.h : "awk 'BEGIN {srand();print \"#define COMPILEDATE \" srand()}' > compiledate.h" ; 
+} else {
+	# make sure compilation fails if there is no awk and compiledate.h is needed
+	if [ GLOB . : compiledate.h ] {
+		GenFileNND compiledate.rm : $(RM) compiledate.h ; 
+	}
+}
+
+# Include all the sub-directory Jamfiles
+
+SubInclude numlib ;
+SubInclude plot ;
+SubInclude icc ;
+SubInclude cgats ;
+SubInclude xml ;
+SubInclude yajl ;
+SubInclude rspl ;
+SubInclude gamut ;
+SubInclude xicc ;
+SubInclude imdi ;
+SubInclude spectro ;
+SubInclude target ;
+SubInclude scanin ;
+SubInclude profile ;
+SubInclude link ;
+SubInclude tweak ;
+SubInclude render ;
+SubInclude namedc ;
+SubInclude ccast ;
+
+if ! $(HAVE_TIFF) {
+	SubInclude tiff ;
+}
+
+if ! $(HAVE_JPEG) {
+	SubInclude jpeg ;
+}
+
+if ! $(HAVE_ZLIB) {
+	SubInclude zlib ;
+}
+
+if ! $(HAVE_PNG) {
+	SubInclude png ;
+}
+
+if $(NT) {
+	SubInclude usb ;
+}
+
+if $(UNIX) && $(OS) != MACOSX {
+	SubInclude jcnf ;
+	SubInclude ucmm ;
+}
+
