@@ -74,6 +74,12 @@
 # define USE_UCMM		/* Enable the Unix micro CMM */
 #endif
 
+/* UNIX_X11 also selects the Linux/BSD USB, HID and ucmm code, so it stays */
+/* defined on Wayland builds. UNIX_X11_DISP guards only the Xlib display code. */
+#if defined(UNIX_X11) && !defined(UNIX_WAYLAND)
+# define UNIX_X11_DISP
+#endif
+
 #ifdef __cplusplus
 	}
 #endif

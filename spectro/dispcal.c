@@ -1549,7 +1549,7 @@ void usage(int flag, char *diag, ...) {
 	}
 	fprintf(stderr,"usage: dispcal [options] outfile\n");
 	fprintf(stderr," -v [n]               Verbose mode\n");
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 	fprintf(stderr," -display displayname Choose X11 display name\n");
 	fprintf(stderr," -d n[,m]             Choose the display n from the following list (default 1)\n");
 	fprintf(stderr,"                      Optionally choose different display m for VideoLUT access\n"); 
@@ -1644,7 +1644,7 @@ void usage(int flag, char *diag, ...) {
 	fprintf(stderr,"                      ho,vi: 0.0 = left/top, 0.5 = center, 1.0 = right/bottom etc.\n");
 	fprintf(stderr,"                      ss: 0.5 = half, 1.0 = normal, 2.0 = double etc.\n");
 	fprintf(stderr," -F                   Fill whole screen with black background\n");
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 	fprintf(stderr," -n                   Don't set override redirect on test window\n");
 #endif
 	fprintf(stderr," -E                   Encode the test values for video range 16..235/255\n");
@@ -1882,7 +1882,7 @@ int main(int argc, char *argv[]) {
 					dummydisp = 1;
 					fa = nfa;
 				} else {
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 					int ix, iv;
 
 					if (strcmp(&argv[fa][2], "isplay") == 0 || strcmp(&argv[fa][2], "ISPLAY") == 0) {
@@ -2058,7 +2058,7 @@ int main(int argc, char *argv[]) {
 					nver = 1;
 				mfa = 0;
 
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 			} else if (argv[fa][1] == 'n') {
 				override = 0;
 #endif /* UNIX */
@@ -2300,7 +2300,7 @@ int main(int argc, char *argv[]) {
 	 && ccdisp == 0
 	 && disp == NULL) {
 		int ix = 0;
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 		char *dn, *pp;
 
 		if ((dn = getenv("DISPLAY")) != NULL) {

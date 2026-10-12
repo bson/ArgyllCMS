@@ -85,7 +85,7 @@ WINSHLWAPI LPWSTR WINAPI PathFindFileNameW(LPCWSTR);
 
 #endif /* UNIX_APPLE */
 
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
@@ -95,7 +95,7 @@ WINSHLWAPI LPWSTR WINAPI PathFindFileNameW(LPCWSTR);
 #include <X11/extensions/Xrandr.h>
 #include <X11/extensions/scrnsaver.h>
 #include <X11/extensions/dpms.h>
-#endif /* UNIX_X11 */
+#endif /* UNIX_X11_DISP */
 
 /* - - - - - - - - - - - - - - - - - - - - - - - */
 
@@ -124,12 +124,17 @@ typedef struct {
 	CGDirectDisplayID ddid;
 #endif /* UNIX_APPLE */
 #if defined(UNIX_X11)
+	unsigned char *edid;	/* 128 or 256 bytes of monitor EDID, NULL if none */
+	int edid_len;			/* 128 or 256 */
+#endif /* UNIX_X11 */
+#if defined(UNIX_WAYLAND)
+	char *wl_uuid;			/* KWin output device UUID, stable across reconnects */
+#endif /* UNIX_WAYLAND */
+#if defined(UNIX_X11_DISP)
 	int screen;				/* X11 (possibly virtual) Screen */
 	int uscreen;			/* Underlying Xinerma/XRandr screen */
 	int rscreen;			/* Underlying RAMDAC screen (user override) */
 	Atom icc_atom;			/* ICC profile root/output atom for this display */
-	unsigned char *edid;	/* 128 or 256 bytes of monitor EDID, NULL if none */
-	int edid_len;			/* 128 or 256 */
 
 #if RANDR_MAJOR == 1 && RANDR_MINOR >= 2
 	/* Xrandr stuff - output is connected 1:1 to a display */
@@ -137,7 +142,7 @@ typedef struct {
 	RROutput output;			/* Associated output */
 	Atom icc_out_atom;			/* ICC profile atom for this output */
 #endif /* randr >= V 1.2 */
-#endif /* UNIX_X11 */
+#endif /* UNIX_X11_DISP */
 } disppath;
 
 /* Return pointer to list of disppath. Last will be NULL. */
@@ -282,13 +287,20 @@ struct _dispwin {
 #endif /* UNIX_APPLE */
 
 #if defined(UNIX_X11)
+	unsigned char *edid;	/* 128 or 256 bytes of monitor EDID, NULL if none */
+	int edid_len;			/* 128 or 256 */
+#endif /* UNIX_X11 */
+
+#if defined(UNIX_WAYLAND)
+	struct _wlwin *wl;		/* Wayland connection, surfaces and saved output state */
+#endif /* UNIX_WAYLAND */
+
+#if defined(UNIX_X11_DISP)
 	Display *mydisplay;
 	int myscreen;			/* Overall X11 (possibly virtual) Screen */
 	int myuscreen;			/* Underlying Xinerma/Xrandr screen */
 	int myrscreen;			/* Underlying RAMDAC screen (user override) */
 	Atom icc_atom;			/* ICC profile root atom for this display */
-	unsigned char *edid;	/* 128 or 256 bytes of monitor EDID, NULL if none */
-	int edid_len;			/* 128 or 256 */
 
 	int shift[3];			/* Bit shift to create RGB value from components */
 	int *rmap[3];			/* Map of fdepth to rdepth values */
@@ -321,7 +333,7 @@ struct _dispwin {
 
 	int dpmsenabled;			/* DPMS is enabled */
 	
-#endif /* UNIX_X11 */
+#endif /* UNIX_X11_DISP */
 
 	void *pcntx;				/* Private context (ie., webwin, ccwin) */
 	volatile unsigned int ncix, ccix;	/* Counters to trigger webwin colorchange */

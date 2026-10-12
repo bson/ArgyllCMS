@@ -9,6 +9,10 @@ tmp/
 /imdi/imdi_k.c
 /imdi/imdi_k.h
 
+# Generated at build time by wayland-scanner
+/spectro/wlp_*.[ch]
+/plot/wlp_*.[ch]
+
 # Executables built by jam
 /cgats/cgats
 /cgats/pars

@@ -2575,7 +2575,7 @@ static void DoPlot(NSRect *rect, plot_info *pdp) {
 #endif /* __APPLE__ */
 
 /* ********************************** X11 version ********************** */
-#ifdef UNIX_X11 /* Assume UNIX + X11 */
+#ifdef UNIX_X11_DISP /* Assume UNIX + X11 */
 
 /* !!!! There is a problem if the user closes the window - an X11 error results */
 /*      This seems to happen before a DestroyNotify !. How to fix ??? !!!! */
@@ -3118,7 +3118,732 @@ plot_info *pdp
 	}
 }
 
-#endif /* UNIX_X11 */
+#endif /* UNIX_X11_DISP */
+
+/* ********************************** Wayland version ****************** */
+#ifdef UNIX_WAYLAND
+
+/* There's no server side drawing on Wayland, so the plot is rasterized */
+/* into a shared memory buffer here, with the Hershey font for text. */
+
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <wayland-client.h>
+#include "wlp_xdg_shell.h"
+#include "wlp_xdg_decoration.h"
+#include "plot_font.h"
+
+#ifdef DODEBUG
+# define debugf(xx)	printf xx
+#else
+# define debugf(xx)
+#endif
+
+#define WLP_TEXT_H 11.0		/* Hershey text height, close to the X11 "fixed" font */
+
+typedef struct {
+	struct wl_display *dpy;
+	struct wl_registry *reg;
+	struct wl_compositor *comp;
+	struct wl_shm *shm;
+	struct wl_seat *seat;
+	struct wl_keyboard *kbd;
+	struct xdg_wm_base *wm;
+	struct zxdg_decoration_manager_v1 *decomgr;
+
+	struct wl_surface *surf;
+	struct xdg_surface *xsurf;
+	struct xdg_toplevel *top;
+	struct zxdg_toplevel_decoration_v1 *deco;
+	int configured;
+	int w, h;				/* Current window size */
+	int pend_w, pend_h;		/* Size from the last toplevel configure, 0 = ours */
+
+	uint32_t *pix;			/* Pixels being drawn into */
+	uint32_t col;			/* Current drawing color, XRGB */
+	int dashed;
+
+	volatile int keyhit;
+	volatile int closed;
+	volatile int framedone;
+} wlplot;
+
+static wlplot *wlp = NULL;		/* Kept between calls, as X11 keeps its window */
+
+/* - - - - - - - - - - - - - - - - - - - - - - - - - - */
+/* Rasterizing */
+
+static void wlp_setcol(wlplot *w, int r, int g, int b) {
+	w->col = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+}
+
+static void wlp_setcold(wlplot *w, float rgb[3]) {
+	wlp_setcol(w, (int)(rgb[0] * 255.0 + 0.5), (int)(rgb[1] * 255.0 + 0.5),
+	              (int)(rgb[2] * 255.0 + 0.5));
+}
+
+static void wlp_pset(wlplot *w, int x, int y) {
+	if (x >= 0 && y >= 0 && x < w->w && y < w->h)
+		w->pix[y * w->w + x] = w->col;
+}
+
+static void wlp_fill(wlplot *w, int x0, int y0, int x1, int y1, uint32_t col) {
+	int x, y;
+	if (x0 < 0) x0 = 0;
+	if (y0 < 0) y0 = 0;
+	if (x1 > w->w) x1 = w->w;
+	if (y1 > w->h) y1 = w->h;
+	for (y = y0; y < y1; y++)
+		for (x = x0; x < x1; x++)
+			w->pix[y * w->w + x] = col;
+}
+
+/* Bresenham with a square pen of width thick, optionally dashed */
+/* 5 on 1 off, as the X11 version asks for on the axes. */
+static void wlp_line(wlplot *w, int x0, int y0, int x1, int y1, int thick) {
+	int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+	int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+	int err = dx + dy, e2;
+	int lo = -(thick - 1) / 2, hi = thick / 2;
+	int step = 0;
+
+	for (;;) {
+		if (!w->dashed || (step % 6) < 5) {
+			int i, j;
+			for (i = lo; i <= hi; i++)
+				for (j = lo; j <= hi; j++)
+					wlp_pset(w, x0 + i, y0 + j);
+		}
+		step++;
+		if (x0 == x1 && y0 == y1)
+			break;
+		e2 = 2 * err;
+		if (e2 >= dy) { err += dy; x0 += sx; }
+		if (e2 <= dx) { err += dx; y0 += sy; }
+	}
+}
+
+static double wlp_hval(char c) { return (double)(c - 'R'); }
+
+/* Width of a string in pixels */
+static double wlp_text_width(char *str) {
+	double wi = 0.0;
+	for (; *str != '\000'; str++) {
+		const char *cp = plot_font[(unsigned char)*str % 128];
+		if (cp[0] == '\000' || cp[1] == '\000')
+			continue;
+		wi += PLOT_FONT_SXI * WLP_TEXT_H * PLOT_FONT_SX * (wlp_hval(cp[1]) - wlp_hval(cp[0]));
+	}
+	return wi;
+}
+
+/* Draw text with its baseline at y, clearing the background first */
+/* like XDrawImageString does */
+static void wlp_text(wlplot *w, int x, int y, char *str) {
+	double cx = x;
+	int odash = w->dashed;
+
+	wlp_fill(w, x, y - (int)(WLP_TEXT_H * 0.9), x + (int)(wlp_text_width(str) + 1.5),
+	         y + (int)(WLP_TEXT_H * 0.35), 0xffffff);
+	w->dashed = 0;
+
+	for (; *str != '\000'; str++) {
+		const char *cp = plot_font[(unsigned char)*str % 128];
+		double lm, rm;
+		int lx = 0, ly = 0, got1 = 0;
+
+		if (cp[0] == '\000' || cp[1] == '\000')
+			continue;
+		lm = wlp_hval(cp[0]);
+		rm = wlp_hval(cp[1]);
+		for (cp += 2; cp[0] != '\000' && cp[1] != '\000'; cp += 2) {
+			int px, py;
+			if (cp[0] == ' ' && cp[1] == 'R') {		/* Pen up */
+				got1 = 0;
+				continue;
+			}
+			px = (int)floor(cx + WLP_TEXT_H * PLOT_FONT_SX
+			                     * (wlp_hval(cp[0]) - lm + PLOT_FONT_HO) + 0.5);
+			py = (int)floor(y + WLP_TEXT_H * PLOT_FONT_SY
+			                    * (wlp_hval(cp[1]) - PLOT_FONT_VO) + 0.5);
+			if (got1)
+				wlp_line(w, lx, ly, px, py, 1);
+			lx = px;
+			ly = py;
+			got1 = 1;
+		}
+		cx += PLOT_FONT_SXI * WLP_TEXT_H * PLOT_FONT_SX * (rm - lm);
+	}
+	w->dashed = odash;
+}
+
+/* - - - - - - - - - - - - - - - - - - - - - - - - - - */
+/* Plot drawing, following the X11 DoPlot() */
+
+static void wlp_xtick(wlplot *w, plot_info *pdp, double x, char *lab) {
+	int xx = 10 + (int)((x - pdp->mnx) * pdp->scx + 0.5);
+	int yy = pdp->sh - 10;
+	wlp_line(w, xx, yy, xx, 0, 1);
+	wlp_text(w, xx-6, yy, lab);
+}
+
+static void wlp_ytick(wlplot *w, plot_info *pdp, double y, char *lab) {
+	int xx = 5;
+	int yy = pdp->sh - 10 - (int)((y - pdp->mny) * pdp->scy + 0.5);
+	wlp_line(w, xx, yy, pdp->sw, yy, 1);
+	wlp_text(w, xx, yy+4, lab);
+}
+
+static void wlp_loose_label(wlplot *w, plot_info *pdp, double min, double max,
+                            void (*pfunc)(wlplot *w, plot_info *pdp, double, char *)) {
+	char str[6], temp[20];
+	int nfrac;
+	double d;
+	double graphmin, graphmax;
+	double range,x;
+
+	range = nicenum(min-max,0);
+	d = nicenum(range/(NTICK-1),1);
+	graphmin = floor(min/d) * d;
+	graphmax = ceil(max/d) * d;
+	nfrac = (int)MAX(-floor(log10(d)),0);
+	sprintf(str,"%%.%df", nfrac);
+	for (x = graphmin; x < graphmax + 0.5 * d; x += d) {
+		sprintf(temp,str,x);
+		pfunc(w, pdp, x, temp);
+	}
+}
+
+static void wlp_doplot(wlplot *w, plot_info *pdp) {
+	int i, j;
+	int lx,ly;		/* Last x,y */
+	int sh = pdp->sh;
+
+	wlp_fill(w, 0, 0, w->w, w->h, 0xffffff);
+
+	wlp_setcol(w, 150, 150, 150);
+	w->dashed = 1;
+
+	/* Plot horizontal axis */
+	if (pdp->revx)
+		wlp_loose_label(w, pdp, pdp->mxx, pdp->mnx, wlp_xtick);
+	else
+		wlp_loose_label(w, pdp, pdp->mnx, pdp->mxx, wlp_xtick);
+
+	/* Plot vertical axis */
+	wlp_loose_label(w, pdp, pdp->mny, pdp->mxy, wlp_ytick);
+
+	w->dashed = 0;
+
+	if (pdp->graph) {		/* Up to MXGPHS graphs */
+		for (j = MXGPHS-1; j >= 0; j--) {
+			double *yp = pdp->yy[j];
+
+			if (yp == NULL)
+				continue;
+
+			wlp_setcol(w, plot_colors[j][0], plot_colors[j][1], plot_colors[j][2]);
+
+			lx = (int)((pdp->x1[0] - pdp->mnx) * pdp->scx + 0.5);
+			ly = (int)((     yp[0] - pdp->mny) * pdp->scy + 0.5);
+
+			for (i = 0; i < pdp->n; i++) {
+				int cx,cy;
+				cx = (int)((pdp->x1[i] - pdp->mnx) * pdp->scx + 0.5);
+				cy = (int)((     yp[i] - pdp->mny) * pdp->scy + 0.5);
+
+				wlp_line(w, 10 + lx, sh - 10 - ly, 10 + cx, sh - 10 - cy, ILTHICK);
+				if (pdp->flags & PLOTF_GRAPHCROSSES) {
+					wlp_line(w, 10 + cx - 5, sh - 10 - cy - 5, 10 + cx + 5, sh - 10 - cy + 5, ILTHICK);
+					wlp_line(w, 10 + cx + 5, sh - 10 - cy - 5, 10 + cx - 5, sh - 10 - cy + 5, ILTHICK);
+				}
+				lx = cx;
+				ly = cy;
+			}
+		}
+
+	} else {	/* Vectors */
+
+		for (i = 0; i < pdp->n; i++) {
+			int cx,cy;
+
+			if (pdp->ncols != NULL)
+				wlp_setcold(w, pdp->ncols[i].rgb);
+
+			lx = (int)((pdp->x1[i] - pdp->mnx) * pdp->scx + 0.5);
+			ly = (int)((pdp->yy[0][i] - pdp->mny) * pdp->scy + 0.5);
+
+			cx = (int)((pdp->x2[i] - pdp->mnx) * pdp->scx + 0.5);
+			cy = (int)((pdp->yy[1][i] - pdp->mny) * pdp->scy + 0.5);
+
+			/* Vector */
+			wlp_line(w, 10 + lx, sh - 10 - ly, 10 + cx, sh - 10 - cy, ILTHICK);
+
+			if (pdp->flags & PLOTF_VECCROSSES) {
+				/* Cross at end of vector */
+				wlp_line(w, 10 + cx - 5, sh - 10 - cy - 5, 10 + cx + 5, sh - 10 - cy + 5, ILTHICK);
+				wlp_line(w, 10 + cx + 5, sh - 10 - cy - 5, 10 + cx - 5, sh - 10 - cy + 5, ILTHICK);
+			}
+
+			if (pdp->ntext != NULL)
+				wlp_text(w, 10 + cx + 5, sh - 10 - cy + 7, pdp->ntext[i]);
+		}
+	}
+
+	/* Extra points */
+	if (pdp->x7 != NULL && pdp->y7 != NULL && pdp->m > 0 ) {
+		wlp_setcol(w, 210, 150, 0);
+
+		for (i = 0; i < pdp->m; i++) {
+			lx = (int)((pdp->x7[i] - pdp->mnx) * pdp->scx + 0.5);
+			ly = (int)((pdp->y7[i] - pdp->mny) * pdp->scy + 0.5);
+
+			if (pdp->mcols != NULL)
+				wlp_setcold(w, pdp->mcols[i].rgb);
+
+			wlp_line(w, 10 + lx - 5, sh - 10 - ly, 10 + lx + 5, sh - 10 - ly, ILTHICK);
+			wlp_line(w, 10 + lx, sh - 10 - ly - 5, 10 + lx, sh - 10 - ly + 5, ILTHICK);
+
+			if (pdp->mtext != NULL)
+				wlp_text(w, 10 + lx + 5, sh - 10 - ly - 7, pdp->mtext[i]);
+		}
+	}
+
+	/* General vectors */
+	if (pdp->x8 != NULL && pdp->y8 != NULL && pdp->x9 != NULL && pdp->y9 && pdp->o > 0 ) {
+		wlp_setcol(w, 150, 255, 255);
+
+		for (i = 0; i < pdp->o; i++) {
+			int cx,cy;
+
+			lx = (int)((pdp->x8[i] - pdp->mnx) * pdp->scx + 0.5);
+			ly = (int)((pdp->y8[i] - pdp->mny) * pdp->scy + 0.5);
+
+			cx = (int)((pdp->x9[i] - pdp->mnx) * pdp->scx + 0.5);
+			cy = (int)((pdp->y9[i] - pdp->mny) * pdp->scy + 0.5);
+
+			if (pdp->ocols != NULL)
+				wlp_setcold(w, pdp->ocols[i].rgb);
+
+			wlp_line(w, 10 + lx, sh - 10 - ly, 10 + cx, sh - 10 - cy, ILTHICK);
+		}
+	}
+
+	/* General symbols and text */
+	if (pdp->xp != NULL && pdp->yp != NULL && pdp->p > 0 ) {
+
+		for (i = 0; i < pdp->p; i++) {
+			int cx,cy;
+
+			/* (Uses mcols rather than pcols, as the X11 version does) */
+			if (pdp->mcols != NULL)
+				wlp_setcold(w, pdp->mcols[i].rgb);
+			else
+				wlp_setcol(w, plot_colors[i % MXGPHS][0], plot_colors[i % MXGPHS][1],
+				              plot_colors[i % MXGPHS][2]);
+
+			cx = (int)((pdp->xp[i] - pdp->mnx) * pdp->scx + 0.5);
+			cy = (int)((pdp->yp[i] - pdp->mny) * pdp->scy + 0.5);
+
+			/* Allow for margin and y being top to bottom */
+			cx += 10;
+			cy += 10;
+			cy = sh - cy;
+
+			switch (pdp->tp[i]) {
+    			case plotDiagCross:
+					wlp_line(w, cx - 5, cy - 5, cx + 5, cy + 5, ILTHICK);
+					wlp_line(w, cx + 5, cy - 5, cx - 5, cy + 5, ILTHICK);
+					break;
+    			case plotOrthCross:
+					wlp_line(w, cx - 5, cy    , cx + 5, cy, ILTHICK);
+					wlp_line(w, cx,     cy - 5, cx,     cy + 5, ILTHICK);
+					break;
+    			case plotSquare:
+					wlp_line(w, cx - 5, cy - 5, cx + 5, cy - 5, ILTHICK);
+					wlp_line(w, cx + 5, cy - 5, cx + 5, cy + 5, ILTHICK);
+					wlp_line(w, cx + 5, cy + 5, cx - 5, cy + 5, ILTHICK);
+					wlp_line(w, cx - 5, cy + 5, cx - 5, cy - 5, ILTHICK);
+					break;
+    			case plotDiamond:
+					wlp_line(w, cx    , cy - 5, cx + 5, cy    , ILTHICK);
+					wlp_line(w, cx + 5, cy    , cx    , cy + 5, ILTHICK);
+					wlp_line(w, cx    , cy + 5, cx - 5, cy    , ILTHICK);
+					wlp_line(w, cx - 5, cy    , cx    , cy - 5, ILTHICK);
+					break;
+    			case plotUpTriang:
+					wlp_line(w, cx - 5, cy + 5, cx    , cy - 5, ILTHICK);
+					wlp_line(w, cx    , cy - 5, cx + 5, cy + 5, ILTHICK);
+					wlp_line(w, cx + 5, cy + 5, cx - 5, cy + 5, ILTHICK);
+					break;
+    			case plotDownTriang:
+					wlp_line(w, cx - 5, cy - 5, cx + 5, cy - 5, ILTHICK);
+					wlp_line(w, cx + 5, cy - 5, cx    , cy + 5, ILTHICK);
+					wlp_line(w, cx    , cy + 5, cx - 5, cy - 5, ILTHICK);
+					break;
+				default:
+					break;
+			}
+
+			if (pdp->ptext != NULL && pdp->ptext[i] != NULL)
+				wlp_text(w, cx + 10, cy +13, pdp->ptext[i]);
+		}
+	}
+}
+
+/* - - - - - - - - - - - - - - - - - - - - - - - - - - */
+/* Wayland plumbing */
+
+static void wlp_buf_release(void *data, struct wl_buffer *buf) {
+	wl_buffer_destroy(buf);
+}
+
+static const struct wl_buffer_listener wlp_buf_listener = { wlp_buf_release };
+
+static void wlp_frame_done(void *data, struct wl_callback *cb, uint32_t t) {
+	((wlplot *)data)->framedone = 1;
+	wl_callback_destroy(cb);
+}
+
+static const struct wl_callback_listener wlp_frame_listener = { wlp_frame_done };
+
+/* Draw the plot into a fresh buffer and show it. Return nz on error. */
+static int wlp_render(wlplot *w) {
+	struct wl_shm_pool *pool;
+	struct wl_buffer *buf;
+	struct wl_callback *cb;
+	int stride = w->w * 4, size = stride * w->h;
+	int fd;
+
+	/* POSIX shm rather than memfd_create(), which needs _GNU_SOURCE */
+	/* and is missing on older BSDs. Unlinked at once, so nothing leaks. */
+	{
+		static int count = 0;
+		char name[50];
+		sprintf(name, "/argyll-plot-%d-%d", (int)getpid(), count++);
+		if ((fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600)) < 0)
+			return 1;
+		shm_unlink(name);
+	}
+	if (ftruncate(fd, size) < 0) {
+		close(fd);
+		return 1;
+	}
+	if ((w->pix = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED) {
+		close(fd);
+		return 1;
+	}
+
+	pd.sx = 0;
+	pd.sy = 0;
+	pd.sw = w->w;
+	pd.sh = w->h;
+	pd.scx = (pd.sw - 10)/(pd.mxx - pd.mnx);
+	pd.scy = (pd.sh - 10)/(pd.mxy - pd.mny);
+	wlp_doplot(w, &pd);
+
+	pool = wl_shm_create_pool(w->shm, fd, size);
+	buf = wl_shm_pool_create_buffer(pool, 0, w->w, w->h, stride, WL_SHM_FORMAT_XRGB8888);
+	wl_shm_pool_destroy(pool);
+	munmap(w->pix, size);
+	w->pix = NULL;
+	close(fd);
+
+	/* The compositor holds on to the buffer until it releases it */
+	wl_buffer_add_listener(buf, &wlp_buf_listener, w);
+	wl_surface_attach(w->surf, buf, 0, 0);
+	wl_surface_damage_buffer(w->surf, 0, 0, w->w, w->h);
+	w->framedone = 0;
+	cb = wl_surface_frame(w->surf);
+	wl_callback_add_listener(cb, &wlp_frame_listener, w);
+	wl_surface_commit(w->surf);
+	return 0;
+}
+
+static void wlp_ping(void *data, struct xdg_wm_base *wm, uint32_t serial) {
+	xdg_wm_base_pong(wm, serial);
+}
+
+static const struct xdg_wm_base_listener wlp_wm_listener = { wlp_ping };
+
+static void wlp_xsurf_configure(void *data, struct xdg_surface *xs, uint32_t serial) {
+	wlplot *w = (wlplot *)data;
+	xdg_surface_ack_configure(xs, serial);
+	if (w->pend_w > 0 && w->pend_h > 0 && (w->pend_w != w->w || w->pend_h != w->h)) {
+		w->w = w->pend_w;
+		w->h = w->pend_h;
+		if (w->configured)
+			wlp_render(w);		/* Resized, so redraw like an X11 Expose */
+	}
+	w->configured = 1;
+}
+
+static const struct xdg_surface_listener wlp_xsurf_listener = { wlp_xsurf_configure };
+
+static void wlp_top_configure(void *data, struct xdg_toplevel *t, int32_t wi, int32_t he,
+                              struct wl_array *states) {
+	((wlplot *)data)->pend_w = wi;
+	((wlplot *)data)->pend_h = he;
+}
+static void wlp_top_close(void *data, struct xdg_toplevel *t) {
+	((wlplot *)data)->closed = 1;
+}
+static void wlp_top_bounds(void *data, struct xdg_toplevel *t, int32_t wi, int32_t he) { }
+static void wlp_top_caps(void *data, struct xdg_toplevel *t, struct wl_array *caps) { }
+
+static const struct xdg_toplevel_listener wlp_top_listener = {
+	wlp_top_configure, wlp_top_close, wlp_top_bounds, wlp_top_caps
+};
+
+static void wlp_kbd_keymap(void *data, struct wl_keyboard *k, uint32_t fmt, int32_t fd,
+                           uint32_t size) {
+	close(fd);		/* Any key will do, so the keymap isn't needed */
+}
+static void wlp_kbd_enter(void *data, struct wl_keyboard *k, uint32_t serial,
+                          struct wl_surface *s, struct wl_array *keys) { }
+static void wlp_kbd_leave(void *data, struct wl_keyboard *k, uint32_t serial,
+                          struct wl_surface *s) { }
+static void wlp_kbd_key(void *data, struct wl_keyboard *k, uint32_t serial, uint32_t time,
+                        uint32_t key, uint32_t state) {
+	if (state == WL_KEYBOARD_KEY_STATE_PRESSED)
+		((wlplot *)data)->keyhit = 1;
+}
+static void wlp_kbd_mods(void *data, struct wl_keyboard *k, uint32_t serial, uint32_t d,
+                         uint32_t l, uint32_t lk, uint32_t g) { }
+static void wlp_kbd_repeat(void *data, struct wl_keyboard *k, int32_t rate, int32_t delay) { }
+
+static const struct wl_keyboard_listener wlp_kbd_listener = {
+	wlp_kbd_keymap, wlp_kbd_enter, wlp_kbd_leave, wlp_kbd_key, wlp_kbd_mods, wlp_kbd_repeat
+};
+
+static void wlp_seat_caps(void *data, struct wl_seat *seat, uint32_t caps) {
+	wlplot *w = (wlplot *)data;
+	if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && w->kbd == NULL) {
+		w->kbd = wl_seat_get_keyboard(seat);
+		wl_keyboard_add_listener(w->kbd, &wlp_kbd_listener, w);
+	}
+}
+static void wlp_seat_name(void *data, struct wl_seat *seat, const char *name) { }
+
+static const struct wl_seat_listener wlp_seat_listener = { wlp_seat_caps, wlp_seat_name };
+
+static void wlp_global(void *data, struct wl_registry *reg, uint32_t name,
+                       const char *iface, uint32_t ver) {
+	wlplot *w = (wlplot *)data;
+
+	if (strcmp(iface, wl_compositor_interface.name) == 0) {
+		w->comp = wl_registry_bind(reg, name, &wl_compositor_interface, 4);
+	} else if (strcmp(iface, wl_shm_interface.name) == 0) {
+		w->shm = wl_registry_bind(reg, name, &wl_shm_interface, 1);
+	} else if (strcmp(iface, wl_seat_interface.name) == 0 && w->seat == NULL) {
+		w->seat = wl_registry_bind(reg, name, &wl_seat_interface, ver < 5 ? ver : 5);
+		wl_seat_add_listener(w->seat, &wlp_seat_listener, w);
+	} else if (strcmp(iface, xdg_wm_base_interface.name) == 0) {
+		w->wm = wl_registry_bind(reg, name, &xdg_wm_base_interface, ver < 4 ? ver : 4);
+		xdg_wm_base_add_listener(w->wm, &wlp_wm_listener, w);
+	} else if (strcmp(iface, zxdg_decoration_manager_v1_interface.name) == 0) {
+		w->decomgr = wl_registry_bind(reg, name, &zxdg_decoration_manager_v1_interface, 1);
+	}
+}
+static void wlp_global_remove(void *data, struct wl_registry *reg, uint32_t name) { }
+
+static const struct wl_registry_listener wlp_reg_listener = { wlp_global, wlp_global_remove };
+
+static void wlp_close_window(wlplot *w) {
+	if (w->deco != NULL)
+		zxdg_toplevel_decoration_v1_destroy(w->deco);
+	if (w->top != NULL)
+		xdg_toplevel_destroy(w->top);
+	if (w->xsurf != NULL)
+		xdg_surface_destroy(w->xsurf);
+	if (w->surf != NULL)
+		wl_surface_destroy(w->surf);
+	w->deco = NULL;
+	w->top = NULL;
+	w->xsurf = NULL;
+	w->surf = NULL;
+	w->configured = 0;
+	w->closed = 0;
+	wl_display_flush(w->dpy);
+}
+
+static void wlp_open_window(wlplot *w, int wi, int he) {
+	w->w = wi;
+	w->h = he;
+	w->pend_w = w->pend_h = 0;
+	w->surf = wl_compositor_create_surface(w->comp);
+	w->xsurf = xdg_wm_base_get_xdg_surface(w->wm, w->surf);
+	xdg_surface_add_listener(w->xsurf, &wlp_xsurf_listener, w);
+	w->top = xdg_surface_get_toplevel(w->xsurf);
+	xdg_toplevel_add_listener(w->top, &wlp_top_listener, w);
+	xdg_toplevel_set_title(w->top, "plot");
+	xdg_toplevel_set_app_id(w->top, "argyllcms-plot");
+	if (w->decomgr != NULL) {
+		w->deco = zxdg_decoration_manager_v1_get_toplevel_decoration(w->decomgr, w->top);
+		zxdg_toplevel_decoration_v1_set_mode(w->deco,
+		                         ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+	}
+	wl_surface_commit(w->surf);
+	while (!w->configured)
+		if (wl_display_dispatch(w->dpy) < 0)
+			error("Lost connection to the Wayland compositor");
+}
+
+static wlplot *wlp_connect(void) {
+	wlplot *w;
+
+	if ((w = calloc(1, sizeof(wlplot))) == NULL)
+		error("plot: malloc failed");
+	if ((w->dpy = wl_display_connect(NULL)) == NULL)
+		error("Unable to connect to the Wayland compositor");
+	w->reg = wl_display_get_registry(w->dpy);
+	wl_registry_add_listener(w->reg, &wlp_reg_listener, w);
+	wl_display_roundtrip(w->dpy);
+	wl_display_roundtrip(w->dpy);		/* Seat capabilities */
+	if (w->comp == NULL || w->shm == NULL || w->wm == NULL)
+		error("The Wayland compositor lacks wl_compositor, wl_shm or xdg_wm_base");
+	return w;
+}
+
+/* Superset implementation function: */
+/* return 0 on success, -1 on error */
+/* (See the X11 version above for the argument details) */
+static int do_plot_imp(
+	int flags,
+    double xmin, double xmax, double ymin, double ymax,	/* Bounding box */
+	double ratio,	/* Aspect ratio of window, X/Y */
+	int dowait,		/* > 0 wait for user to hit space key, < 0 delat dowait seconds. */
+    double *x1, double *x2,
+    double *yy[MXGPHS], plot_col *ncols, char **ntext,
+	int n,
+	double *x7, double *y7, plot_col *mcols, char **mtext,
+    int m,
+	double *x8, double *y8, double *x9, double *y9, plot_col *ocols,
+	int o,
+	double *xp, double *yp, plot_sym *tp, plot_col *pcols, char **ptext,
+	int p
+) {
+	if (dolog) do_log_imp(
+		flags,
+	    xmin, xmax, ymin, ymax, ratio,
+		dowait,
+		x1, x2, yy, ncols, ntext, n,
+		x7, y7, mcols, mtext, m,
+		x8, y8, x9, y9, ocols, o,
+		xp, yp, tp, pcols, ptext, p);
+
+	/* Put information in global pd */
+	{
+		int j;
+		double xr,yr;
+
+		pd.flags = flags;
+		pd.dowait = dowait;
+		pd.ratio = ratio;
+
+		pd.mnx = xmin;
+		pd.mny = ymin;
+		pd.mxx = xmax;
+		pd.mxy = ymax;
+
+		/* Allow some extra around plot */
+		xr = pd.mxx - pd.mnx;
+		yr = pd.mxy - pd.mny;
+		if (xr < 1e-6)
+			xr = 1e-6;
+		if (yr < 1e-6)
+			yr = 1e-6;
+		pd.mnx -= xr/10.0;
+		pd.mxx += xr/10.0;
+		pd.mny -= yr/10.0;
+		pd.mxy += yr/10.0;
+
+		/* Transfer raw point info */
+		if (x2 == NULL)
+			pd.graph = 1;		/* MXGPHS graphs + points */
+		else
+			pd.graph = 0;
+		pd.x1 = x1;
+		pd.x2 = x2;
+		if (yy != NULL) {
+			for (j = 0; j < MXGPHS; j++)
+				pd.yy[j] = yy[j];
+		} else {
+			for (j = 0; j < MXGPHS; j++)
+				pd.yy[j] = NULL;
+		}
+		pd.ncols = ncols;
+		pd.ntext = ntext;
+		pd.n = abs(n);
+
+		if (n < 0) {
+			double tt;
+			tt = pd.mxx;
+			pd.mxx = pd.mnx;
+			pd.mnx = tt;
+			pd.revx = 1;
+		} else {
+			pd.revx = 0;
+		}
+		pd.x7 = x7;
+		pd.y7 = y7;
+		pd.mcols = mcols;
+		pd.mtext = mtext;
+		pd.m = abs(m);
+
+		pd.x8 = x8;
+		pd.y8 = y8;
+		pd.x9 = x9;
+		pd.y9 = y9;
+		pd.ocols = ocols;
+		pd.o = abs(o);
+
+		pd.xp = xp;
+		pd.yp = yp;
+		pd.tp = tp;
+		pd.pcols = pcols;
+		pd.ptext = ptext;
+		pd.p = abs(p);
+	}
+
+	ui_UsingGUI();
+
+	if (wlp == NULL)
+		wlp = wlp_connect();
+
+	if (wlp->surf == NULL)
+		wlp_open_window(wlp, (int)(DEFWWIDTH * ratio + 0.5), DEFWHEIGHT);
+
+	if (wlp_render(wlp))
+		error("plot: unable to allocate a shared memory buffer");
+
+	wlp->keyhit = 0;
+	if (pd.dowait > 0) {
+		debugf(("Waiting for a key\n"));
+		while (!wlp->keyhit && !wlp->closed) {
+			if (wl_display_dispatch(wlp->dpy) < 0)
+				error("Lost connection to the Wayland compositor");
+		}
+	} else {
+		/* Make sure the plot gets to the screen before carrying on */
+		while (!wlp->framedone && !wlp->closed) {
+			if (wl_display_dispatch(wlp->dpy) < 0)
+				error("Lost connection to the Wayland compositor");
+		}
+		if (pd.dowait < 0)
+			sleep(-pd.dowait);
+	}
+
+	/* Like X11, closing the window ends the wait, and we open a new one */
+	/* next time */
+	if (wlp->closed)
+		wlp_close_window(wlp);
+
+	return 0;
+}
+
+#endif /* UNIX_WAYLAND */
 
 /***********************************************************************/
 /* Nice graph labeling functions */

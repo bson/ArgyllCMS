@@ -64,6 +64,10 @@ USE_CMFM = false ;
 # Compile in graph plotting code
 USE_PLOT = true ;		# [true] 
 
+# On Linux/BSD, use Wayland (KWin) rather than X11 for the test patch and
+# plot windows. ?= so that -sUSE_WAYLAND=false on the jam command line wins.
+USE_WAYLAND ?= true ;	# [true]
+
 # Enable UTF-8 code pages on MSWindows V 1903 or later,
 # to make executable language handling consistent across MSWin/OS X/Linux
 WIN_UTF8 = true ;		# [true]
@@ -86,6 +90,52 @@ if $(UNIX) {
 		LINKFLAGS += -framework CoreFoundation ;
 		LINKFLAGS += -framework AppKit ;
 		LINKFLAGS += -framework AudioToolbox ;
+
+	} else if $(USE_WAYLAND) = true {
+		DEFINES += UNIX_WAYLAND ;
+
+		# Jam can't run pkg-config, so find the libdbus headers the same way
+		# as the X11 ones below. The second directory holds the arch-specific
+		# dbus-arch-deps.h.
+		if [ GLOB /usr/include/dbus-1.0/dbus : dbus.h ] {
+			LibWinH = /usr/include/dbus-1.0 ;
+		} else if [ GLOB /usr/local/include/dbus-1.0/dbus : dbus.h ] {
+			LibWinH = /usr/local/include/dbus-1.0 ;
+		} else {
+			EXIT Unable to locate the dbus-1 include files ;
+		}
+		if [ GLOB /usr/lib64/dbus-1.0/include/dbus : dbus-arch-deps.h ] {
+			LibWinH += /usr/lib64/dbus-1.0/include ;
+		} else if [ GLOB /usr/lib/x86_64-linux-gnu/dbus-1.0/include/dbus : dbus-arch-deps.h ] {
+			LibWinH += /usr/lib/x86_64-linux-gnu/dbus-1.0/include ;
+		} else if [ GLOB /usr/lib/aarch64-linux-gnu/dbus-1.0/include/dbus : dbus-arch-deps.h ] {
+			LibWinH += /usr/lib/aarch64-linux-gnu/dbus-1.0/include ;
+		} else if [ GLOB /usr/lib/dbus-1.0/include/dbus : dbus-arch-deps.h ] {
+			LibWinH += /usr/lib/dbus-1.0/include ;
+		} else if [ GLOB /usr/local/lib/dbus-1.0/include/dbus : dbus-arch-deps.h ] {
+			LibWinH += /usr/local/lib/dbus-1.0/include ;
+		} else {
+			EXIT Unable to locate dbus-arch-deps.h ;
+		}
+
+		WLPROTO_SYS ?= /usr/share/wayland-protocols ;
+		if ! [ GLOB $(WLPROTO_SYS)/stable/xdg-shell : xdg-shell.xml ] {
+			EXIT Unable to locate the wayland-protocols XML files in $(WLPROTO_SYS) ;
+		}
+		WLPROTO_KDE ?= /usr/share/plasma-wayland-protocols ;
+		if ! [ GLOB $(WLPROTO_KDE) : kde-output-device-v2.xml ] {
+			EXIT Unable to locate the plasma-wayland-protocols XML files in $(WLPROTO_KDE) ;
+		}
+
+		if $(OS) = FREEBSD {
+			LINKFLAGS += -g -lrt -lusb ;
+			GUILINKFLAGS += -L/usr/local/lib -lwayland-client -ldbus-1 ;
+		} else if $(OS) = OPENBSD {
+			GUILINKFLAGS += -L/usr/local/lib -lwayland-client -ldbus-1 ;
+		} else {
+			LINKFLAGS += -ldl -lrt ;
+			GUILINKFLAGS += -lwayland-client -ldbus-1 ;
+		}
 
 	# Hmm. Would be nice to use pkg-config here, if system has it.
 	} else {
@@ -277,3 +327,31 @@ if ! $(HAVE_SSL) {
 # testing
 #DSTDIR = var ;
 #SRCDIR = .. ;
+
+# Generate Wayland client glue for one protocol:
+#   WaylandProtocol basename : protocol.xml ;
+# produces basename.h and basename.c in the current directory. List
+# basename.c among the sources of whatever uses it, and make that
+# source's objects depend on basename.h, since Jam's header scan runs
+# before the header exists.
+rule WaylandProtocol
+{
+	local _h = [ NormIDstTargets $(<).h ] ;
+	local _c = [ NormIDstTargets $(<).c ] ;
+	MakeLocate $(_h) $(_c) ;
+	Depends files : $(_h) $(_c) ;
+	NotFile $(>) ;
+	WaylandHeader $(_h) : $(>) ;
+	WaylandCode $(_c) : $(>) ;
+	Clean clean : $(_h) $(_c) ;
+}
+
+actions WaylandHeader
+{
+	wayland-scanner client-header $(>) $(<)
+}
+
+actions WaylandCode
+{
+	wayland-scanner private-code $(>) $(<)
+}

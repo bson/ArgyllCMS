@@ -98,6 +98,9 @@
 #ifdef NT
 # include "madvrwin.h"
 #endif
+#ifdef UNIX_WAYLAND
+# include "dispwin_wl.h"
+#endif
 #include "insttypes.h"
 #include "inst.h"
 #include "icoms.h"
@@ -348,7 +351,7 @@ static unsigned short *char2wchar(char *s) {
 #endif /* NT */
 
 
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 /* Hack to notice if the error handler has been triggered */
 /* when a function doesn't return a value. */
 
@@ -643,7 +646,7 @@ disppath **get_displays() {
 	free(dids);
 #endif /* UNIX_APPLE */
 
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 	int i, j, k;
 	int defsix = 0;		/* default screen index */
 	int dcount;			/* Number of screens */
@@ -1242,6 +1245,10 @@ disppath **get_displays() {
 
 #endif /* UNIX X11 */
 
+#if defined(UNIX_WAYLAND)
+	disps = wl_get_displays();
+#endif /* UNIX_WAYLAND */
+
 	return disps;
 }
 
@@ -1260,6 +1267,10 @@ void free_disppaths(disppath **disps) {
 #if defined(UNIX_X11)
 			if (disps[i]->edid != NULL)
 				free(disps[i]->edid);
+#endif
+#if defined(UNIX_WAYLAND)
+			if (disps[i]->wl_uuid != NULL)
+				free(disps[i]->wl_uuid);
 #endif
 			free(disps[i]);
 		}
@@ -1283,6 +1294,10 @@ void del_disppath(disppath **disps, int ix) {
 #if defined(UNIX_X11)
 				if (disps[i]->edid != NULL)
 					free(disps[i]->edid);
+#endif
+#if defined(UNIX_WAYLAND)
+				if (disps[i]->wl_uuid != NULL)
+					free(disps[i]->wl_uuid);
 #endif
 				free(disps[i]);
 
@@ -1351,6 +1366,16 @@ disppath *get_a_display(int ix) {
 		memmove(rv->edid, paths[i]->edid, rv->edid_len );
 	}
 #endif
+#if defined(UNIX_WAYLAND)
+	/* The structure copy shares the string, and paths is about to be freed */
+	if (paths[i]->wl_uuid != NULL
+	 && (rv->wl_uuid = strdup(paths[i]->wl_uuid)) == NULL) {
+		debugrr("get_displays failed on malloc\n");
+		free(rv);
+		free_disppaths(paths);
+		return NULL;
+	}
+#endif
 	debugrr2((errout, " Selected ix %d '%s' %s'\n",i,rv->name,rv->description));
 
 	free_disppaths(paths);
@@ -1366,6 +1391,10 @@ void free_a_disppath(disppath *path) {
 #if defined(UNIX_X11)
 		if (path->edid != NULL)
 			free(path->edid);
+#endif
+#if defined(UNIX_WAYLAND)
+		if (path->wl_uuid != NULL)
+			free(path->wl_uuid);
 #endif
 		free(path);
 	}
@@ -1500,7 +1529,7 @@ static ramdac *dispwin_get_ramdac(dispwin *p) {
 	}
 #endif /* UNIX_APPLE */
 
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 	unsigned short vals[3][16384];
 	int nent = 0;
 	int evb = 0, erb = 0;
@@ -1614,6 +1643,14 @@ static ramdac *dispwin_get_ramdac(dispwin *p) {
 		}
 	}
 #endif	/* UNXI X11 */
+
+#if defined(UNIX_WAYLAND)
+	/* No Wayland protocol gives clients the gamma ramps, */
+	/* and KWin doesn't offer them over D-Bus either */
+	debugr("dispwin_get_ramdac: no VideoLUT access on Wayland\n");
+	return NULL;
+#endif /* UNIX_WAYLAND */
+
 	debugr("dispwin_get_ramdac returning OK\n");
 	return r;
 }
@@ -1894,7 +1931,7 @@ static int dispwin_set_ramdac(dispwin *p, ramdac *r, int persist) {
 #ifdef NT
 	WORD vals[3][256];		/* 16 bit elements */
 #endif
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 	unsigned short vals[3][16384];
 #endif
 
@@ -1904,6 +1941,11 @@ static int dispwin_set_ramdac(dispwin *p, ramdac *r, int persist) {
 		debugr("dispwin_set_ramdac: calibration isn't sane\n");
 		return 1;
 	}
+
+#if defined(UNIX_WAYLAND)
+	debugr("dispwin_set_ramdac: no VideoLUT access on Wayland\n");
+	return 1;
+#endif /* UNIX_WAYLAND */
 
 #ifdef NT
 
@@ -2371,7 +2413,7 @@ static int dispwin_set_ramdac(dispwin *p, ramdac *r, int persist) {
 
 #endif /* UNIX_APPLE */
 
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 
 	for (j = 0; j < 3; j++) {
 		for (i = 0; i < r->nent; i++) {
@@ -2539,7 +2581,7 @@ void dispwin_del_ramdac(ramdac *r) {
 
 /* Useful function for X11 profile atom settings */
 
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 /* Return NZ on error */
 static int set_X11_atom(dispwin *p, char *fname) {
 	FILE *fp;
@@ -3035,6 +3077,7 @@ int dispwin_install_profile(dispwin *p, char *fname, ramdac *r, p_scope scope) {
 			return 1;
 		} 
 
+#if defined(UNIX_X11_DISP)
 		if ((rv = set_X11_atom(p, fname)) != 0) {
 			debugr2((errout,"Setting X11 atom failed"));
 			return 1;
@@ -3046,6 +3089,29 @@ int dispwin_install_profile(dispwin *p, char *fname, ramdac *r, p_scope scope) {
 			debugr2((errout,"Failed to set VideoLUT"));
 			return 1;
 		}
+#endif /* UNIX_X11_DISP */
+#if defined(UNIX_WAYLAND)
+		/* Point KWin at the installed copy rather than the user's file, */
+		/* which may be moved or deleted. KWin applies its vcgt itself. */
+		{
+			char *ipath = NULL;
+
+			if (cd_found)
+				ev = cd_edid_get_profile(p->edid, p->edid_len, &ipath);
+			else
+				ev = ucmm_get_monitor_profile(p->edid, p->edid_len, p->name, &ipath);
+			if (ev != ucmm_ok) {
+				debugr2((errout,"Locating installed profile failed with error %d '%s'\n",ev,ucmm_error_string(ev)));
+				return 1;
+			}
+			rv = wl_dispwin_set_profile(p, ipath);
+			free(ipath);
+			if (rv != 0) {
+				debugr2((errout,"Setting the compositor's output profile failed\n"));
+				return 1;
+			}
+		}
+#endif /* UNIX_WAYLAND */
 		return 0;
 	}
 #endif  /* UNXI X11 */
@@ -3326,6 +3392,7 @@ int dispwin_uninstall_profile(dispwin *p, char *fname, p_scope scope) {
 			return 1;
 		} 
 
+#if defined(UNIX_X11_DISP)
 		if (p->icc_atom != None)
 			XDeleteProperty(p->mydisplay, RootWindow(p->mydisplay, 0), p->icc_atom);
 
@@ -3335,6 +3402,13 @@ int dispwin_uninstall_profile(dispwin *p, char *fname, p_scope scope) {
 			XRRDeleteOutputProperty(p->mydisplay, p->output, p->icc_out_atom);
 		}
 #endif /* randr >= V 1.2 */
+#endif /* UNIX_X11_DISP */
+#if defined(UNIX_WAYLAND)
+		if (wl_dispwin_set_profile(p, NULL) != 0) {
+			debugr2((errout,"Resetting the compositor's output profile failed\n"));
+			return 1;
+		}
+#endif /* UNIX_WAYLAND */
 		return 0;
 	}
 #endif  /* UNXI X11 */
@@ -3547,12 +3621,14 @@ icmFile *dispwin_get_profile(dispwin *p, char *name, int mxlen) {
 				return NULL;
 			}
 
+#if defined(UNIX_X11_DISP)
 			/* Implicitly we set the X11 atom to be the profile we just got */ 
 			debugr2((errout,"Setting X11 atom to current profile '%s'\n",profile));
 			if (set_X11_atom(p, profile) != 0) {
 				debugr2((errout,"Setting X11 atom to profile '%s' failed",profile));
 				/* Hmm. We ignore this error */
 			}
+#endif /* UNIX_X11_DISP */
 			free(profile);
 			return rd_fp;
 		} 
@@ -3560,9 +3636,10 @@ icmFile *dispwin_get_profile(dispwin *p, char *name, int mxlen) {
 			debugr2((errout,"Got ucmm error %d '%s'\n",ev,ucmm_error_string(ev)));
 			return NULL;
 		}
-		debugr2((errout,"Failed to get configured profile, so use X11 atom\n"));
+		debugr2((errout,"Failed to get configured profile, so ask the display system\n"));
 		/* Drop through to using the X11 root window atom */
 	}
+#if defined(UNIX_X11_DISP)
 	{
 		Atom ret_type;
 		int ret_format;
@@ -3637,6 +3714,31 @@ icmFile *dispwin_get_profile(dispwin *p, char *name, int mxlen) {
 		}
 		return rd_fp;
 	}
+#endif /* UNIX_X11_DISP */
+#if defined(UNIX_WAYLAND)
+	/* A profile set in KDE's display settings rather than by ucmm */
+	{
+		icmErr err = { 0, { '\000'} };
+		char *profile;
+
+		if ((profile = wl_dispwin_get_profile_path(p)) == NULL) {
+			debugr("The compositor isn't using an ICC profile for this output\n");
+			return NULL;
+		}
+		debugr2((errout,"Loading compositor's profile '%s'\n",profile));
+		if ((rd_fp = new_icmFileStd_name(&err, profile,"r")) == NULL) {
+			debugr2((errout,"Can't open file '%s'",profile));
+			free(profile);
+			return NULL;
+		}
+		if (name != NULL) {
+			strncpy(name, profile, mxlen);
+			name[mxlen] = '\000';
+		}
+		free(profile);
+		return rd_fp;
+	}
+#endif /* UNIX_WAYLAND */
 #endif	  /* UNXI X11 */
 
 	return NULL;
@@ -3664,7 +3766,7 @@ static void restore_display(dispwin *p) {
 		p->r = NULL;
 	}
 
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 
 #if ScreenSaverMajorVersion >= 1 && ScreenSaverMinorVersion >= 1	/* X11R7.1 */
 	if (p->xsssuspend) {
@@ -3699,7 +3801,11 @@ static void restore_display(dispwin *p) {
 
 	/* Flush any changes out */
 	XSync(p->mydisplay, False);
-#endif /* UNIX_X11 */
+#endif /* UNIX_X11_DISP */
+
+#if defined(UNIX_WAYLAND)
+	wl_dispwin_restore(p);
+#endif /* UNIX_WAYLAND */
 }
 	
 /* ----------------------------------------------- */
@@ -4144,11 +4250,18 @@ double r, double g, double b	/* Color values 0.0 - 1.0 */
 			tt = (int)(tt/frange * rrange + 0.5);	/* expected RAMDAC index */
 			tt = (int)(tt/rrange * nrange + 0.5);	/* actual RAMDAC index */
 #endif
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 			/* We assume linear mapping with perfect rounding between rdepth and ndepth */
 			tt = (int)(vv * frange + 0.5);			/* Frame buffer value */
 			p->r_rgb[j] = (double)tt/frange;		/* Double frame buffer value */
 			tt = p->rmap[j][tt];					/* expected RAMDAC index */
+			tt = (int)(tt/rrange * nrange + 0.5);	/* actual RAMDAC index */
+#endif
+#if defined(UNIX_WAYLAND)
+			/* Not reached without VideoLUT access, but keeps tt defined */
+			tt = (int)(vv * frange + 0.5);			/* Frame buffer value */
+			p->r_rgb[j] = (double)tt/frange;		/* Double frame buffer value */
+			tt = (int)(tt/frange * rrange + 0.5);	/* expected RAMDAC index */
 			tt = (int)(tt/rrange * nrange + 0.5);	/* actual RAMDAC index */
 #endif
 
@@ -4311,7 +4424,7 @@ double r, double g, double b	/* Color values 0.0 - 1.0 */
 
 	/* - - - - - - - - - - - - - - */
 
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 	{
 		unsigned int vali[3];
 		unsigned long fbval;
@@ -4340,6 +4453,15 @@ double r, double g, double b	/* Color values 0.0 - 1.0 */
 		debugr2((errout,"dispwin_set_color paint done\n"));
 	}
 #endif	/* UNXI X11 */
+
+#if defined(UNIX_WAYLAND)
+	debugr2((errout,"dispwin_set_color about to paint color %f %f %f\n",
+	         p->r_rgb[0], p->r_rgb[1], p->r_rgb[2]));
+	if (wl_dispwin_set_color(p) != 0) {
+		debugr("dispwin_set_color: Wayland patch update failed\n");
+		return 1;
+	}
+#endif	/* UNIX_WAYLAND */
 
 	if (p->callout != NULL) {
 		int rv;
@@ -4518,7 +4640,7 @@ dispwin *p
 	/* -------------------------------------------------- */
 
 	/* -------------------------------------------------- */
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 	debugr("About to close display\n");
 
 	if (p->mydisplay != NULL) {
@@ -4542,11 +4664,16 @@ dispwin *p
 		}
 	}
 	debugr("finished\n");
+#endif	/* UNIX_X11_DISP */
 
+#if defined(UNIX_WAYLAND)
+	wl_dispwin_close(p);
+#endif	/* UNIX_WAYLAND */
+
+#if defined(UNIX_X11)
 	if (p->edid != NULL)
 		free(p->edid);
-
-#endif	/* UNXI X11 */
+#endif	/* UNIX_X11 */
 	/* -------------------------------------------------- */
 
 	if (p->name != NULL) {
@@ -4712,7 +4839,7 @@ static LRESULT CALLBACK MainWndProc(
 
 #endif /* UNIX_APPLE */
 
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 	/* None */
 #endif	/* UNXI X11 */
 
@@ -5274,7 +5401,7 @@ int ddebug						/* >0 to print debug statements to stderr */
 	/* -------------------------------------------------- */
 
 	/* -------------------------------------------------- */
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 	{
 		/* NOTE: That we're not doing much to detect if the display/window
 		   we open is unsuitable for high quality color (ie. at least
@@ -5940,6 +6067,26 @@ int ddebug						/* >0 to print debug statements to stderr */
 #endif	/* UNIX X11 */
 	/* -------------------------------------------------- */
 
+#if defined(UNIX_WAYLAND)
+	if ((p->name = strdup(disp->name)) == NULL
+	 || (p->description = strdup(disp->description)) == NULL) {
+		debugr2((errout,"new_dispwin: Malloc failed\n"));
+		dispwin_del(p);
+		return NULL;
+	}
+	if (wl_dispwin_open(p, disp, width, height, hoff, voff, native) != 0) {
+		debugrr2((errout,"new_dispwin: Unable to open Wayland output '%s'\n",disp->name));
+		dispwin_del(p);
+		return NULL;
+	}
+	/* So a signal undoes our output color mode and Night Light changes. */
+	/* (The restore talks to the compositor from the signal handler, which */
+	/* can deadlock if the signal lands while we wait for a patch to be */
+	/* presented - the same hazard Xlib had here.) */
+	dispwin_install_signal_handlers(p);
+#endif	/* UNIX_WAYLAND */
+	/* -------------------------------------------------- */
+
 	/* Save the original ramdac, which gets restored on exit */
 	if ((p->or = p->get_ramdac(p)) != NULL) {
 
@@ -5989,7 +6136,7 @@ int ddebug						/* >0 to print debug statements to stderr */
 }
 
 /* ================================================================ */
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 
 /* Set the X11 atom and load the appropriate calibrations for all */
 /* the displays. */
@@ -6407,7 +6554,7 @@ static void usage(int flag, char *diag, ...) {
 	}
 	fprintf(stderr,"usage: dispwin [options] [calfile] \n");
 	fprintf(stderr," -v                   Verbose mode\n");
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 	fprintf(stderr," -display displayname Choose X11 display name\n");
 	fprintf(stderr," -d n[,m]             Choose the display n from the following list (default 1)\n");
 	fprintf(stderr,"                      Optionally choose different display m for Video LUT access\n"); 
@@ -6486,7 +6633,7 @@ static void usage(int flag, char *diag, ...) {
 	fprintf(stderr," -S d                 Specify the install/uninstall scope for OS X [nlu] or X11/Vista [lu]\n");
 	fprintf(stderr,"                      d is one of: n = network, l = local system, u = user (default)\n");
 	fprintf(stderr," -L                   Load installed profile & calibration\n");
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 	fprintf(stderr," -x                   Load all profiles for given X11 server\n");
 	fprintf(stderr," -X                   Run in daemon loader mode for given X11 server\n");
 #endif /* X11 */
@@ -6639,7 +6786,7 @@ main(int argc, char *argv[]) {
 					fa = nfa;
 #endif /* ENABLE_VTPGLUT */
 				} else {
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 					int ix, iv;
 
 					/* X11 type display name. */
@@ -6766,11 +6913,13 @@ main(int argc, char *argv[]) {
 			else if (argv[fa][1] == 'L')
 				loadprofile = 1;
 
+#if defined(UNIX_X11_DISP)
 			else if (argv[fa][1] == 'x')
 				daemonmode = 2;
 
 			else if (argv[fa][1] == 'X')
 				daemonmode = 1;
+#endif
 
 			else if (argv[fa][1] == 'S') {
 				fa = nfa;
@@ -6799,7 +6948,7 @@ main(int argc, char *argv[]) {
 	 && webdisp == 0
 	 && ccdisp == 0) {
 		int ix = 0;
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 		char *dn, *pp;
 
 		if ((dn = getenv("DISPLAY")) != NULL) {
@@ -6822,7 +6971,7 @@ main(int argc, char *argv[]) {
 			loadfile = 1;		/* Load the given profile into the VideoLUT */
 	}
 
-#if defined(UNIX_X11)
+#if defined(UNIX_X11_DISP)
 	if (webdisp == 0 && ccdisp == 0 && daemonmode == 2) {
 		return x11_load_all(disp, verb, ddebug);
 	}

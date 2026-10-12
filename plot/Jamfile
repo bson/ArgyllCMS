@@ -16,8 +16,21 @@ if $(MSVCNT) {
 	CCFLAGS += "/Zm400" ;
 }
 
+# These reference each other (layer-shell's popups are xdg-shell objects),
+# so they go in one library where the linker resolves them together.
+# libplot needs nothing from libconv for them, and libdisp, which uses
+# layer-shell, is always linked before libplot.
+WLPLOTSOURCE = ;
+if $(UNIX) && $(OS) != MACOSX && $(USE_WAYLAND) = true {
+	WaylandProtocol wlp_xdg_shell : $(WLPROTO_SYS)/stable/xdg-shell/xdg-shell.xml ;
+	WaylandProtocol wlp_xdg_decoration : $(WLPROTO_SYS)/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml ;
+	# Not packaged by Fedora, so a copy is kept here
+	WaylandProtocol wlp_layer_shell : [ NormPaths wlproto/wlr-layer-shell-unstable-v1.xml ] ;
+	WLPLOTSOURCE = wlp_xdg_shell.c wlp_xdg_decoration.c wlp_layer_shell.c ;
+}
+
 # PLOT library
-Library libplot : plot.c : : : ../h ../numlib ../spectro ;
+Library libplot : plot.c $(WLPLOTSOURCE) : : : ../h ../numlib ../spectro ;
 if $(UNIX) && $(OS) != MACOSX {
   ObjectHdrs plot : $(LibWinH) ;
 }
@@ -37,7 +50,7 @@ if [ GLOB $(PATH) : xxd xxd.exe ] {
 
 # Individual stand alone test of plot library
 LINKFLAGS += $(GUILINKFLAGS) ;
-MainVariant plot : plot.c : : STANDALONE_TEST : ../h ../numlib ../spectro : : ../spectro/libconv.lib ../numlib/libnum.lib ../numlib/libui.lib ;
+MainVariant plot : plot.c $(WLPLOTSOURCE) : : STANDALONE_TEST : ../h ../numlib ../spectro : : ../spectro/libconv.lib ../numlib/libnum.lib ../numlib/libui.lib ;
 
 #MainsFromSources ttt.c : : : ../numlib ;
 #Main ttt : ttt.c : : : ../numlib : : ../numlib/libnum libplot : ;
