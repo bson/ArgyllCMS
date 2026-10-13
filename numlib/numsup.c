@@ -21,6 +21,7 @@
 #if defined (NT)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <io.h>
 #endif
 #ifdef UNIX
 #include <unistd.h>
@@ -209,6 +210,17 @@ char *fl_end = "";			/* For strings with no \n and a do_fflush() */
 
 void check_if_not_interactive() {
 	char *ev;
+
+	/* A front end reading our output through a pipe needs progress and */
+	/* prompts as they're printed, and neither ends with a newline, so stdout */
+	/* is unbuffered unless it's a terminal (stderr always is). This does */
+	/* what running us under stdbuf -o0 does, where there's no stdbuf. */
+#ifdef NT
+	if (!_isatty(_fileno(stdout)))
+#else
+	if (!isatty(fileno(stdout)))
+#endif
+		setvbuf(stdout, NULL, _IONBF, 0);
 
 #ifdef NEVER
 # ifdef NT

@@ -254,6 +254,16 @@ all absorbed by the hub's retries. The software now rides out such errors:
   `terminate`, so `i1d3_del()`'s fallback called a NULL pointer.
 - `spectro/usbio_lx.c`: failed URBs log their errno at debug level 1.
 
+## Output for front ends (numlib/numsup.c)
+
+`check_if_not_interactive()`, which the interactive programs (dispcal,
+dispread, dispwin, targen, colprof, spotread, ccxxmake and others) call
+first thing, makes stdout unbuffered (`setvbuf(_IONBF)`) when it isn't a
+terminal. A front end reading through a pipe then gets progress and
+prompts as they're printed (neither ends with a newline), as running under
+`stdbuf -o0` gives, on systems without stdbuf (macOS, Windows). stderr is
+unbuffered already. On a terminal nothing changes.
+
 ## spectro/dispcal.c, dispread.c, ccxxmake.c
 
 Option handling for `-display`, `-d n,m` and `-n` (override redirect) is
