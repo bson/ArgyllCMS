@@ -233,5 +233,6 @@ under `UNIX_X11_DISP`. The ICC header platform stays under `UNIX_X11`.
   with no dropouts, and the same dispcal calibration ran with no reconnects
   or open retries: white point error 0.35 dE, average neutral error 0.42 dE;
   calibrated white 0.3121, 0.3289 (0.4 dE from the daylight locus).
-
-Not yet tested: the symbol shapes in plots.
+- Plot symbols: all six shapes (diagonal and orthogonal cross, square,
+  diamond, up and down triangle) draw correctly, in the default plot colors,
+  with labels at the X11 offsets and the grid blanked behind the text.
