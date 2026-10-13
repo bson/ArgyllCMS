@@ -17,6 +17,15 @@ everything else.
 
     sh makeall.sh
 
+To install the programs into `bin/` and the reference files into `ref/` under
+a directory of your choice:
+
+    jam -q -fJambase -sDESTDIR=/opt/argyll-kde-wayland install
+
+Put its `bin/` ahead of any distribution ArgyllCMS on your `PATH`. The
+distribution package can stay installed: its udev rule is what gives users
+access to the instruments.
+
 To build the original X11 version instead:
 
     jam -q -fJambase -sUSE_WAYLAND=false
