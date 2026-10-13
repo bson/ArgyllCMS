@@ -66,11 +66,11 @@ Static-link order dictated where the generated glue lives:
     treating them as sRGB.
   - adds an idle inhibitor.
 - `wl_dispwin_set_color()`: quantizes `r_rgb` to `fdepth` like the X11 path,
-  scales to 32 bits for `create_u32_rgba_buffer`, commits the patch and the
+  looks it up in the software LUT while measuring (see below), scales to 32 bits for `create_u32_rgba_buffer`, commits the patch and the
   parent, then waits up to 1s for `wp_presentation` feedback (or a frame
   callback) before returning.
-- `wl_dispwin_restore()`: undoes temporary changes (tradeoff, generated LUT
-  profile) from the saved state, deletes a temporary generated profile and
+- `wl_dispwin_restore()`: undoes temporary changes (tradeoff, sRGB mode
+  while measuring, generated LUT profile) from the saved state, deletes a temporary generated profile and
   releases Night Light. It is called from `restore_display()`, so it also
   runs from the signal handler. Talking to the compositor from the handler can
   deadlock if a signal arrives during the presentation wait, the same hazard
@@ -79,7 +79,8 @@ Static-link order dictated where the generated glue lives:
 - `wl_dispwin_set_profile()` / `wl_dispwin_get_profile_path()`: set or read
   the output's ICC profile. Setting one updates the saved state and resets
   `base_lut` to the profile's vcgt, so restoring the caller's copy of the
-  calibration on exit is a no-op instead of replacing the new profile.
+  calibration on exit is a no-op instead of replacing the new profile. While
+  measuring it only updates the saved state, which the restore applies.
 
 ### VideoLUT emulation
 
@@ -97,22 +98,27 @@ the LUT as a 256 entry vcgt, and points KWin at it in ICC mode.
 - A persistent LUT (`dispwin cal`, `dispwin -c`) becomes the new saved state
   and `base_lut`, so the exit restore leaves it in place. The previous
   generated persistent profile is deleted.
-- Pass-through while measuring: KWin encodes output with the active
-  profile's own tone curves, but describes the output to our tagged surfaces
-  with a single transfer function. A profile with per-channel measured
-  curves (dispcal/colprof profiles) therefore alters test values per channel;
-  grays measured up to about 0.025 off in x while white was right. Generated
-  profiles have identical pure power curves and pass values through. So
-  `wl_dispwin_open()` switches to a generated profile carrying the current
-  LUT whenever a window is up and the saved profile is an ICC profile that
-  isn't ours (`wl_needs_passthrough()`), and `wl_dispwin_set_lut()` doesn't
-  treat "back to the original LUT" as "restore the saved profile" while that
-  holds. The saved profile comes back in `wl_dispwin_restore()`.
-- `wl_dispwin_get_lut()` reads the vcgt of the profile KWin is using, or
-  linear without one. Argyll can't read ICC v4 profiles, so their vcgt is
+- While measuring (`sw_lut`), the LUT is applied to the patches instead.
+  KWin's ICC mode doesn't pass test values through with any profile:
+  single-channel ramps measured with a generated profile clipped red at
+  87.5% and blue at 97.5% and boosted green, and the vcgt is sampled about an
+  entry off. Earlier, per-channel TRCs in dispcal/colprof profiles shifted
+  grays as well. dispcal fits its model to those ramps, giving profiles whose
+  white disagreed with their grays. sRGB mode gives a clean ramp. So
+  `wl_dispwin_open()` switches the output to sRGB mode (`cps_changed`) before
+  making the window, as the window's surfaces are tagged with the output's
+  image description, and starts `cur_lut` at `base_lut`. Non-persistent LUT
+  loads then only replace `cur_lut`, and `wl_dispwin_set_color()` draws
+  `cur_lut(v)`, interpolated and unquantized, so native high-precision mode
+  still reaches between 8 bit levels. Persistent loads and profile installs
+  update the saved state for the restore without touching KWin. Without a
+  window (e.g. `dispwin cal`), or if sRGB mode can't be set, LUT loads go
+  through generated profiles as above.
+- `wl_dispwin_get_lut()` returns `cur_lut` while measuring, otherwise the
+  vcgt of the profile KWin is using, or linear without one. Argyll can't read ICC v4 profiles, so their vcgt is
   taken as linear.
-- Each LUT load takes about 50 ms, so the per-patch LUT updates of native
-  high-precision mode add little to Argyll's own settling delays.
+- Each LUT load through KWin takes about 50 ms; while measuring, loads cost
+  nothing.
 
 ## Platform check for front ends
 
@@ -259,6 +265,14 @@ under `UNIX_X11_DISP`. The ICC header platform stays under `UNIX_X11`.
   with no dropouts, and the same dispcal calibration ran with no reconnects
   or open retries: white point error 0.35 dE, average neutral error 0.42 dE;
   calibrated white 0.3121, 0.3289 (0.4 dE from the daylight locus).
+- Software LUT while measuring, started from ICC mode: single-channel ramps
+  (70-100%) matched sRGB mode to within 0.2% where ICC mode had clipped red
+  and blue. A fresh `dispcal -ql -t 5500 -g 2.2 -o` profile has white point
+  x 0.3325, y 0.3481 (was 0.311 before the change); verifying it on 57
+  patches (grays, primaries and secondaries, ColorChecker) through its
+  calibration gave CIEDE2000 average 0.61, maximum 2.09 (near black), gray
+  average 1.00, where the earlier profile gave 5.59 and 14.89. The output
+  was back in ICC mode with the user's profile afterwards.
 - Plot symbols: all six shapes (diagonal and orthogonal cross, square,
   diamond, up and down triangle) draw correctly, in the default plot colors,
   with labels at the X11 offsets and the grid blanked behind the text.

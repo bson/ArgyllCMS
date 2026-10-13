@@ -150,9 +150,12 @@ struct _wlwin {
 	int saved_cps, saved_cpt;
 	char *saved_icc;
 	int cpt_changed;	/* nz if we temporarily changed color_power_tradeoff */
+	int cps_changed;	/* nz if the saved profile source must be put back */
 	int lut_active;		/* nz if a temporary generated LUT profile is in use */
 	char *gen_path;		/* The generated profile in use, if any */
 	double base_lut[3][WL_LUT_SIZE];	/* LUT the saved state gives */
+	int sw_lut;			/* nz while the LUT is applied to patches by us */
+	double cur_lut[3][WL_LUT_SIZE];		/* That LUT */
 
 	DBusConnection *bus;	/* Held open, because KWin drops an inhibit on disconnect */
 	dbus_uint32_t nl_cookie;
@@ -444,7 +447,6 @@ static const struct wl_registry_listener reg_listener = {
 
 static void wl_free_conn(wlwin *w);
 static void wl_read_lut(dispwin *p, double lut[3][WL_LUT_SIZE], char *path);
-static int wl_needs_passthrough(wlwin *w);
 
 /* Connect, bind globals and collect the initial output device state. */
 static wlwin *wl_new_conn(void) {
@@ -1204,25 +1206,52 @@ int wl_dispwin_open(dispwin *p, disppath *disp, double width, double height,
 		}
 	}
 
+	/* KWin's ICC mode doesn't pass test values through, whatever the */
+	/* profile: measured single channel ramps clipped red near 87% and */
+	/* blue near 97%, and the vcgt is sampled about an entry off. Its sRGB */
+	/* mode gives a clean gamma ramp, so measure in that and apply the */
+	/* VideoLUT to the patch values ourselves. This must happen before the */
+	/* window is made, as its surfaces are tagged with the output's */
+	/* image description, which the mode changes. */
+	if (p->nent == WL_LUT_SIZE) {
+		int ok = 1;
+
+		if (w->dev->cps != KDE_CPS_SRGB) {
+			if (wl_apply_config(p, KDE_CPS_SRGB, -1, NULL) == 0) {
+				w->cps_changed = 1;
+				debugr2((errout, "wl_dispwin_open: output %s set to sRGB mode, was %d\n",
+				         w->dev->name, w->saved_cps));
+			} else {
+				warning("Couldn't switch %s to sRGB mode, so its profile may "
+				        "alter the test values", w->dev->name);
+				ok = 0;
+			}
+		}
+		/* Otherwise LUT loads fall back to generated profiles in KWin */
+		if (ok) {
+			memcpy(w->cur_lut, w->base_lut, sizeof(w->cur_lut));
+			w->sw_lut = 1;
+		}
+	}
+
 	if (wl_create_window(p, disp, width, height, hoff, voff))
 		return 1;
 
-	/* Measure through a profile that leaves test values alone, with the */
-	/* calibration currently in effect (see wl_needs_passthrough()) */
-	if (p->nent == WL_LUT_SIZE && wl_needs_passthrough(w)) {
-		ramdac cur;
-		int j;
-
-		memset(&cur, 0, sizeof(cur));
-		cur.nent = WL_LUT_SIZE;
-		for (j = 0; j < 3; j++)
-			cur.v[j] = w->base_lut[j];
-		if (wl_dispwin_set_lut(p, &cur, 0) != 0)
-			warning("Couldn't give %s a pass-through profile, so its own profile "
-			        "may alter the test values", w->dev->name);
-	}
-
 	return 0;
+}
+
+/* Look v (0..1) up in a LUT, interpolating between entries */
+static double wl_lut_lookup(double *lut, double v) {
+	double x = v * (WL_LUT_SIZE - 1.0);
+	int i = (int)x;
+
+	if (i < 0)
+		return lut[0];
+	if (i >= WL_LUT_SIZE - 1)
+		return lut[WL_LUT_SIZE - 1];
+	x -= i;
+	v = lut[i] + x * (lut[i + 1] - lut[i]);
+	return v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v;
 }
 
 int wl_dispwin_set_color(dispwin *p) {
@@ -1241,11 +1270,15 @@ int wl_dispwin_set_color(dispwin *p) {
 		return 1;
 	}
 
-	/* Quantize to the frame buffer depth as X11 does, then scale to the */
-	/* 32 bit range so the compositor sees exactly that level */
+	/* Quantize to the frame buffer depth as X11 does, look that up in the */
+	/* emulated VideoLUT, then scale to the 32 bit range so the compositor */
+	/* sees exactly that level. The LUT output isn't quantized, which is */
+	/* what lets native (native & 1) output reach between 8 bit levels. */
 	for (j = 0; j < 3; j++) {
 		double fmax = (1 << p->fdepth) - 1.0;
 		double q = (double)(int)(fmax * p->r_rgb[j] + 0.5) / fmax;
+		if (w->sw_lut)
+			q = wl_lut_lookup(w->cur_lut[j], q);
 		v[j] = (uint32_t)(q * 4294967295.0 + 0.5);
 	}
 
@@ -1290,17 +1323,6 @@ static int wl_is_gen_path(char *path) {
 	return path != NULL && strstr(path, "/" WL_LUT_DIR "/") != NULL;
 }
 
-/* nz while test patches are on screen and the profile KWin would use */
-/* isn't one of ours. KWin encodes output with the profile's own tone */
-/* curves, but describes the output to our tagged surfaces with a single */
-/* transfer function. A profile with per-channel measured curves, as */
-/* dispcal and colprof make, then alters test values channel by channel */
-/* (seen as grays several dE off while white was right). Ours have */
-/* identical pure power curves, so values pass through. */
-static int wl_needs_passthrough(wlwin *w) {
-	return w->base != NULL && w->saved_cps == KDE_CPS_ICC && !wl_is_gen_path(w->saved_icc);
-}
-
 /* The saved profile path to give KWin when restoring, or NULL to leave */
 /* the path alone. KWin rejects a path to a missing file, which happens */
 /* when the saved profile has just been uninstalled. */
@@ -1317,17 +1339,20 @@ void wl_dispwin_restore(dispwin *p) {
 	if (w == NULL)
 		return;
 
-	if (w->cpt_changed || w->lut_active) {
-		char *icc = w->lut_active ? wl_restore_path(w) : NULL;
+	if (w->cpt_changed || w->cps_changed || w->lut_active) {
+		int cps = w->cps_changed || w->lut_active;
+		char *icc = cps ? wl_restore_path(w) : NULL;
 
-		if (wl_apply_config(p, w->lut_active ? w->saved_cps : -1,
+		if (wl_apply_config(p, cps ? w->saved_cps : -1,
 		                       w->cpt_changed ? w->saved_cpt : -1, icc) != 0)
 			warning("Couldn't restore the color settings of %s", w->dev->name);
 		else
 			debugr("wl_dispwin_restore: restored output color settings\n");
 		w->cpt_changed = 0;
+		w->cps_changed = 0;
 		w->lut_active = 0;
 	}
+	w->sw_lut = 0;
 
 	/* A temporary generated profile is no longer referenced by KWin */
 	if (w->gen_path != NULL) {
@@ -1387,9 +1412,11 @@ int wl_dispwin_set_profile(dispwin *p, char *path) {
 	if (w == NULL || w->dev == NULL)
 		return 1;
 
-	/* While a generated LUT profile is in use, just make the restore */
-	/* leave the new profile in effect */
-	if (!w->lut_active && wl_apply_config(p, cps, -1, path) != 0)
+	/* While a generated LUT profile is in use, or we're measuring in sRGB */
+	/* mode, just make the restore leave the new profile in effect */
+	if (w->sw_lut)
+		w->cps_changed = 1;
+	else if (!w->lut_active && wl_apply_config(p, cps, -1, path) != 0)
 		return 1;
 
 	w->saved_cps = cps;
@@ -1402,6 +1429,9 @@ int wl_dispwin_set_profile(dispwin *p, char *path) {
 	/* So that restoring the caller's copy of this calibration on exit */
 	/* doesn't generate a profile to replace the one just installed */
 	wl_read_lut(p, w->base_lut, path);
+	/* KWin would now be applying its calibration */
+	if (w->sw_lut)
+		memcpy(w->cur_lut, w->base_lut, sizeof(w->cur_lut));
 	return 0;
 }
 
@@ -1586,9 +1616,13 @@ int wl_dispwin_get_lut(dispwin *p, double *v[3]) {
 	if (w == NULL || w->dev == NULL || p->nent != WL_LUT_SIZE)
 		return 1;
 
-	if (w->dev->cps == KDE_CPS_ICC)
-		path = w->dev->icc_path;
-	wl_read_lut(p, lut, path);
+	if (w->sw_lut)
+		memcpy(lut, w->cur_lut, sizeof(lut));
+	else {
+		if (w->dev->cps == KDE_CPS_ICC)
+			path = w->dev->icc_path;
+		wl_read_lut(p, lut, path);
+	}
 	for (j = 0; j < 3; j++)
 		for (i = 0; i < WL_LUT_SIZE; i++)
 			v[j][i] = lut[j][i];
@@ -1615,12 +1649,20 @@ int wl_dispwin_set_lut(dispwin *p, ramdac *r, int persist) {
 		}
 	}
 
+	/* While measuring, the LUT only applies to the patches. That's all */
+	/* calibration and native output (one load per patch) need, and it */
+	/* never touches KWin. */
+	if (w->sw_lut) {
+		for (j = 0; j < 3; j++)
+			for (i = 0; i < WL_LUT_SIZE; i++)
+				w->cur_lut[j][i] = r->v[j][i];
+		if (!persist)
+			return 0;
+	}
+
 	/* Going back to the LUT the saved state gives (e.g. restoring the */
-	/* original LUT on exit) just means restoring the saved state, except */
-	/* while measuring: that state's profile may not pass test values */
-	/* through, so keep a generated one with the same LUT until the */
-	/* window closes and wl_dispwin_restore() puts the saved state back. */
-	if (isbase && !persist && !wl_needs_passthrough(w)) {
+	/* original LUT on exit) just means restoring the saved state */
+	if (isbase && !persist) {
 		if (w->lut_active) {
 			if (wl_apply_config(p, w->saved_cps, -1, wl_restore_path(w)) != 0)
 				return 1;
@@ -1652,14 +1694,16 @@ int wl_dispwin_set_lut(dispwin *p, ramdac *r, int persist) {
 		free(path);
 		return 1;
 	}
-	/* Already in use, e.g. restoring the original LUT while measuring */
-	if (!(w->lut_active && w->gen_path != NULL && strcmp(w->gen_path, path) == 0)
+	/* Already in use, or a persistent load while measuring in sRGB mode, */
+	/* which wl_dispwin_restore() applies */
+	if (!w->sw_lut
+	 && !(w->lut_active && w->gen_path != NULL && strcmp(w->gen_path, path) == 0)
 	 && wl_apply_config(p, KDE_CPS_ICC, -1, path) != 0) {
 		free(path);
 		return 1;
 	}
-	debugr2((errout, "wl_dispwin_set_lut: KWin now using '%s'%s\n", path,
-	         persist ? " (persistent)" : ""));
+	debugr2((errout, "wl_dispwin_set_lut: KWin %s using '%s'%s\n",
+	         w->sw_lut ? "will be" : "now", path, persist ? " (persistent)" : ""));
 
 	/* The previous temporary profile is no longer referenced */
 	if (w->gen_path != NULL && strcmp(w->gen_path, path) != 0
@@ -1680,6 +1724,8 @@ int wl_dispwin_set_lut(dispwin *p, ramdac *r, int persist) {
 			for (i = 0; i < WL_LUT_SIZE; i++)
 				w->base_lut[j][i] = r->v[j][i];
 		w->lut_active = 0;
+		if (w->sw_lut)
+			w->cps_changed = 1;
 	} else {
 		w->lut_active = 1;
 	}

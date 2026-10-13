@@ -38,10 +38,13 @@ To build the original X11 version instead:
 - While measuring, KWin Night Light is suspended and the screen is kept from
   blanking.
 - Wayland doesn't let applications load the video card's calibration tables
-  (VideoLUT). Instead, Argyll loads calibration curves by having KWin use a
-  small generated profile that carries them, so `dispcal` can calibrate as
-  well as profile. Temporary changes are undone when Argyll exits, and
-  `dispwin` can still load a calibration that stays in effect.
+  (VideoLUT). While measuring, Argyll applies calibration curves to the test
+  patches itself, with the output in KWin's sRGB mode, whose values pass
+  through unaltered; so `dispcal` can calibrate as well as profile. Outside
+  measurement, calibration curves are loaded by having KWin use a small
+  generated profile that carries them. Temporary changes are undone when
+  Argyll exits, and `dispwin` can still load a calibration that stays in
+  effect.
 - Installing a profile makes KWin use it for that output, including its
   calibration curves.
 - If the instrument stops responding, when it's opened or in the middle of
