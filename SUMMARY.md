@@ -230,6 +230,8 @@ under `UNIX_X11_DISP`. The ICC header platform stays under `UNIX_X11`.
   0.3122, 0.3297 (6526 K, 0.9 dE from the daylight locus, was 9.4) and
   gamma 2.18.
 - Behind a powered hub, a 30 patch dispread with 24 black patches completed
-  with no dropouts.
+  with no dropouts, and the same dispcal calibration ran with no reconnects
+  or open retries: white point error 0.35 dE, average neutral error 0.42 dE;
+  calibrated white 0.3121, 0.3289 (0.4 dE from the daylight locus).
 
 Not yet tested: the symbol shapes in plots.
