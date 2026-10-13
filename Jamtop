@@ -118,11 +118,15 @@ if $(UNIX) {
 			EXIT Unable to locate dbus-arch-deps.h ;
 		}
 
-		WLPROTO_SYS ?= /usr/share/wayland-protocols ;
+		# The protocol definitions are kept in wlproto/ (see its README),
+		# as some are newer than many distributions' packages; -s overrides
+		# them. Not anchored like DESTDIR: wayland-scanner runs from this
+		# top directory, where the path is right as it is.
+		WLPROTO_SYS ?= [ NormPaths wlproto/wayland-protocols ] ;
+		WLPROTO_KDE ?= [ NormPaths wlproto/plasma-wayland-protocols ] ;
 		if ! [ GLOB $(WLPROTO_SYS)/stable/xdg-shell : xdg-shell.xml ] {
 			EXIT Unable to locate the wayland-protocols XML files in $(WLPROTO_SYS) ;
 		}
-		WLPROTO_KDE ?= /usr/share/plasma-wayland-protocols ;
 		if ! [ GLOB $(WLPROTO_KDE) : kde-output-device-v2.xml ] {
 			EXIT Unable to locate the plasma-wayland-protocols XML files in $(WLPROTO_KDE) ;
 		}

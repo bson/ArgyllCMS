@@ -10,8 +10,9 @@ everything else.
 
 - KDE Plasma 6 (KWin). Other compositors don't provide the output information
   (EDID, the ICC profile in use) or the output color mode controls this needs.
-- Build: `jam`, `wayland-scanner`, and development files for `wayland-client`,
-  `wayland-protocols`, `plasma-wayland-protocols` and `dbus-1`.
+- Build: `jam`, `wayland-scanner`, and development files for `wayland-client`
+  and `dbus-1`. The Wayland protocol definitions it needs come with the
+  source, as some are newer than many distributions' packages.
 
 ## Building
 

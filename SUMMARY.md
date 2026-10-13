@@ -8,8 +8,8 @@ Details of the Wayland port, relative to the upstream ArgyllCMS 3.5.0 import
 - `Jamtop`: `USE_WAYLAND ?= true` (non-Apple Unix). When true it adds
   `DEFINES += UNIX_WAYLAND`, finds the libdbus include dirs by `GLOB` (jam
   can't run pkg-config), checks for the wayland-protocols and
-  plasma-wayland-protocols XML dirs (`WLPROTO_SYS`, `WLPROTO_KDE`, overridable
-  with `-s`), and links `-lwayland-client -ldbus-1` in place of the X libs.
+  plasma-wayland-protocols XML dirs (`WLPROTO_SYS`, `WLPROTO_KDE`, by default
+  the copies in `wlproto/`, overridable with `-s`), and links `-lwayland-client -ldbus-1` in place of the X libs.
   `?=` is deliberate so that `-sUSE_WAYLAND=false` on the command line wins.
 - `Jamtop`: rule `WaylandProtocol basename : file.xml ;` generates
   `basename.h`/`basename.c` with `wayland-scanner` (client-header,
@@ -36,6 +36,14 @@ Static-link order dictated where the generated glue lives:
   `libdisp` user links `libconv` after it.
 - `plot/wlproto/wlr-layer-shell-unstable-v1.xml` is a vendored copy (v5, MIT)
   because Fedora doesn't package wlr-protocols.
+- `wlproto/` holds unchanged copies of the other nine protocol definitions
+  used (wayland-protocols 1.49, plasma-wayland-protocols 1.21.0, with their
+  licences; see its README), because color-management-v1 and the KDE output
+  protocols are newer than many distributions' packages (Ubuntu 24.04's, for
+  one, which DisplayCraft's AppImage is built on). The defaults are
+  `[ NormPaths wlproto/... ]`, relative to the top directory, where
+  wayland-scanner runs; anchoring them like `DESTDIR` made them relative to
+  each sub-Jamfile instead, and the scanner couldn't find them.
 
 ## spectro/dispwin_wl.c, dispwin_wl.h
 
