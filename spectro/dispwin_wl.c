@@ -1281,6 +1281,9 @@ int wl_dispwin_set_color(dispwin *p) {
 			q = wl_lut_lookup(w->cur_lut[j], q);
 		v[j] = (uint32_t)(q * 4294967295.0 + 0.5);
 	}
+	debugr2((errout, "wl_dispwin_set_color: %f %f %f -> %f %f %f\n",
+	         p->r_rgb[0], p->r_rgb[1], p->r_rgb[2],
+	         v[0] / 4294967295.0, v[1] / 4294967295.0, v[2] / 4294967295.0));
 
 	buf = wp_single_pixel_buffer_manager_v1_create_u32_rgba_buffer(w->spb,
 	                                                  v[0], v[1], v[2], 0xffffffff);
