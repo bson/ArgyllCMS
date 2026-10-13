@@ -964,6 +964,8 @@ static int icoms_usb_transaction(
 		if (stat == -ENOMSG) {	/* Submit or cancel failed */
 			reqrv = ICOM_SYS;
 		} else if (reqrv == ICOM_OK && stat < 0 && stat != -ECONNRESET) {	/* Error result */
+			a1logd(p->log, 1, "coms_usb_transaction: ep 0x%x urb %d failed with %d (%s)\n",
+			       endpoint, i, stat, strerror(-stat));
 			if ((endpoint & IUSB_ENDPOINT_DIR_MASK) == IUSB_ENDPOINT_OUT)
 				reqrv = ICOM_USBW;
 			else

@@ -1239,6 +1239,7 @@ athread *new_athread_reusable(
 	p->wait_stop = athread_wait_stop;
 	p->wait = athread_wait;
 	p->del = athread_del;
+	p->terminate = athread_terminate;	/* (Was only set on MSWindows, so i1d3_del() crashed) */
 
 #if defined(UNIX_APPLE)
 	{

@@ -3871,9 +3871,11 @@ i1d3_del(inst *pp) {
 		if (p->th != NULL) {		/* Terminate diffuser monitor thread  */
 			int i;
 			p->th_term = 1;			/* Tell thread to exit on error */
-			for (i = 0; p->th_termed == 0 && i < 5; i++)
+			/* The thread may be in a 1 second diffuser query after */
+			/* a communication failure, plus its 100 msec poll sleep */
+			for (i = 0; p->th_termed == 0 && i < 40; i++)
 				msec_sleep(50);	/* Wait for thread to terminate */
-			if (i >= 5) {
+			if (i >= 40) {
 				a1logd(p->log,3,"i1d3 diffuser thread termination failed\n");
 				p->th->terminate(p->th);		/* Try and force thread to terminate */
 			}

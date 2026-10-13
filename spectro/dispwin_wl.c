@@ -22,6 +22,8 @@
 #include <errno.h>
 #include <poll.h>
 #include <stdint.h>
+#include <math.h>
+#include <unistd.h>
 #include <wayland-client.h>
 #include <dbus/dbus.h>
 #include "copyright.h"
@@ -31,6 +33,7 @@
 #include "cgats.h"
 #include "conv.h"
 #include "base64.h"
+#include "xdg_bds.h"
 #include "dispwin.h"
 #include "dispwin_wl.h"
 #include "wlp_xdg_shell.h"
@@ -56,6 +59,12 @@
 /* against a stalled compositor, not a timing value. */
 #define WL_PRESENT_TIMEOUT 1000
 #define WL_CONFIG_TIMEOUT 5000
+
+/* VideoLUT emulation entries, matching the 8 bit frame buffer we assume */
+#define WL_LUT_SIZE 256
+
+/* Generated VideoLUT profiles, under the user's XDG data directory */
+#define WL_LUT_DIR "ArgyllCMS/wayland"
 
 /* KWin color_profile_source and color_power_tradeoff values */
 #define KDE_CPS_SRGB 0
@@ -136,9 +145,15 @@ struct _wlwin {
 	volatile int configured, closed;
 	uint32_t conf_w, conf_h;
 
-	/* State to restore */
-	int neutral;		/* nz if we changed the output color mode */
+	/* Output state to restore on exit, saved at open. Persistent changes */
+	/* (profile install, persistent LUT load) update it. */
 	int saved_cps, saved_cpt;
+	char *saved_icc;
+	int cpt_changed;	/* nz if we temporarily changed color_power_tradeoff */
+	int lut_active;		/* nz if a temporary generated LUT profile is in use */
+	char *gen_path;		/* The generated profile in use, if any */
+	double base_lut[3][WL_LUT_SIZE];	/* LUT the saved state gives */
+
 	DBusConnection *bus;	/* Held open, because KWin drops an inhibit on disconnect */
 	dbus_uint32_t nl_cookie;
 	int nl_inhibited;
@@ -428,6 +443,7 @@ static const struct wl_registry_listener reg_listener = {
 /* Connection setup/teardown */
 
 static void wl_free_conn(wlwin *w);
+static void wl_read_lut(dispwin *p, double lut[3][WL_LUT_SIZE], char *path);
 
 /* Connect, bind globals and collect the initial output device state. */
 static wlwin *wl_new_conn(void) {
@@ -1104,8 +1120,21 @@ int wl_dispwin_open(dispwin *p, disppath *disp, double width, double height,
 	p->fdepth = 8;
 	p->rdepth = p->fdepth;
 	p->edepth = 16;
-	p->nent = 0;		/* No VideoLUT access */
-	p->ndepth = 0;
+
+	/* The VideoLUT is emulated by having KWin load a generated profile, */
+	/* which needs the ICC path and profile source requests */
+	if (w->kmgmt != NULL && w->kmgmt_ver >= 8 && w->dev->cps >= 0) {
+		p->nent = WL_LUT_SIZE;
+		p->ndepth = 8;
+	} else {
+		p->nent = 0;
+		p->ndepth = 0;
+	}
+
+	w->saved_cps = w->dev->cps;
+	w->saved_cpt = w->dev->cpt;
+	w->saved_icc = wl_strdup_or_null(w->dev->icc_path);
+	wl_read_lut(p, w->base_lut, w->saved_cps == KDE_CPS_ICC ? w->saved_icc : NULL);
 
 	if (p->nowin)
 		return 0;
@@ -1120,22 +1149,15 @@ int wl_dispwin_open(dispwin *p, disppath *disp, double width, double height,
 
 	nl_inhibit(p);
 
-	if (native & 1) {
-		/* Without VideoLUT access, the nearest thing to loading a linear */
-		/* LUT is having KWin stop applying the profile's transform and vcgt. */
-		w->saved_cps = w->dev->cps;
-		w->saved_cpt = w->dev->cpt;
-		if ((w->dev->cps >= 0 && w->dev->cps != KDE_CPS_SRGB)
-		 || (w->dev->cpt >= 0 && w->dev->cpt != KDE_CPT_ACCURACY)) {
-			if (wl_apply_config(p, w->dev->cps >= 0 ? KDE_CPS_SRGB : -1,
-			                       w->dev->cpt >= 0 ? KDE_CPT_ACCURACY : -1, NULL) == 0) {
-				w->neutral = 1;
-				debugr2((errout, "wl_dispwin_open: output %s set to sRGB/accuracy mode, "
-				         "was source %d tradeoff %d\n", w->dev->name, w->saved_cps,
-				         w->saved_cpt));
-			} else {
-				warning("Couldn't switch %s to a neutral color mode", w->dev->name);
-			}
+	/* Callers asking for native output load a linear LUT themselves. */
+	/* KWin's "efficiency" mode may take shortcuts with color precision. */
+	if ((native & 1) && w->dev->cpt >= 0 && w->dev->cpt != KDE_CPT_ACCURACY) {
+		if (wl_apply_config(p, -1, KDE_CPT_ACCURACY, NULL) == 0) {
+			w->cpt_changed = 1;
+			debugr2((errout, "wl_dispwin_open: output %s set to accuracy mode, was %d\n",
+			         w->dev->name, w->saved_cpt));
+		} else {
+			warning("Couldn't switch %s to its color accuracy mode", w->dev->name);
 		}
 	}
 
@@ -1205,18 +1227,45 @@ int wl_dispwin_set_color(dispwin *p) {
 	return 0;
 }
 
+/* nz if path is one of our generated LUT profiles */
+static int wl_is_gen_path(char *path) {
+	return path != NULL && strstr(path, "/" WL_LUT_DIR "/") != NULL;
+}
+
+/* The saved profile path to give KWin when restoring, or NULL to leave */
+/* the path alone. KWin rejects a path to a missing file, which happens */
+/* when the saved profile has just been uninstalled. */
+static char *wl_restore_path(wlwin *w) {
+	if (w->saved_icc == NULL || w->saved_icc[0] == '\000'
+	 || access(w->saved_icc, R_OK) != 0)
+		return NULL;
+	return w->saved_icc;
+}
+
 void wl_dispwin_restore(dispwin *p) {
 	wlwin *w = p->wl;
 
 	if (w == NULL)
 		return;
 
-	if (w->neutral) {
-		w->neutral = 0;
-		if (wl_apply_config(p, w->saved_cps, w->saved_cpt, NULL) != 0)
-			warning("Couldn't restore the color mode of %s", w->dev->name);
+	if (w->cpt_changed || w->lut_active) {
+		char *icc = w->lut_active ? wl_restore_path(w) : NULL;
+
+		if (wl_apply_config(p, w->lut_active ? w->saved_cps : -1,
+		                       w->cpt_changed ? w->saved_cpt : -1, icc) != 0)
+			warning("Couldn't restore the color settings of %s", w->dev->name);
 		else
-			debugr("wl_dispwin_restore: restored output color mode\n");
+			debugr("wl_dispwin_restore: restored output color settings\n");
+		w->cpt_changed = 0;
+		w->lut_active = 0;
+	}
+
+	/* A temporary generated profile is no longer referenced by KWin */
+	if (w->gen_path != NULL) {
+		if (w->saved_icc == NULL || strcmp(w->gen_path, w->saved_icc) != 0)
+			unlink(w->gen_path);
+		free(w->gen_path);
+		w->gen_path = NULL;
 	}
 	nl_uninhibit(p);
 }
@@ -1255,6 +1304,8 @@ void wl_dispwin_close(dispwin *p) {
 		wl_buffer_destroy(w->base_buf);
 	wl_display_flush(w->dpy);
 
+	free(w->saved_icc);
+	free(w->gen_path);
 	wl_free_conn(w);
 	p->wl = NULL;
 }
@@ -1262,28 +1313,301 @@ void wl_dispwin_close(dispwin *p) {
 int wl_dispwin_set_profile(dispwin *p, char *path) {
 	wlwin *w = p->wl;
 	int cps = path != NULL ? KDE_CPS_ICC : KDE_CPS_SRGB;
+	char *old = w != NULL ? w->saved_icc : NULL;
 
 	if (w == NULL || w->dev == NULL)
 		return 1;
 
-	if (w->neutral) {
-		/* Keep measuring in neutral mode, but make the restore */
-		/* leave the new profile in effect */
-		w->saved_cps = cps;
-		return path != NULL ? wl_apply_config(p, -1, -1, path) : 0;
+	/* While a generated LUT profile is in use, just make the restore */
+	/* leave the new profile in effect */
+	if (!w->lut_active && wl_apply_config(p, cps, -1, path) != 0)
+		return 1;
+
+	w->saved_cps = cps;
+	if (path != NULL) {
+		w->saved_icc = strdup(path);
+		if (wl_is_gen_path(old) && strcmp(old, path) != 0)
+			unlink(old);
+		free(old);
 	}
-	return wl_apply_config(p, cps, -1, path);
+	/* So that restoring the caller's copy of this calibration on exit */
+	/* doesn't generate a profile to replace the one just installed */
+	wl_read_lut(p, w->base_lut, path);
+	return 0;
 }
 
 char *wl_dispwin_get_profile_path(dispwin *p) {
 	wlwin *w = p->wl;
-	int cps;
 
 	if (w == NULL || w->dev == NULL)
 		return NULL;
 
-	cps = w->neutral ? w->saved_cps : w->dev->cps;
-	if (cps != KDE_CPS_ICC || w->dev->icc_path == NULL || w->dev->icc_path[0] == '\000')
+	/* Report the user's profile, not one generated for a LUT */
+	if (w->saved_cps != KDE_CPS_ICC || w->saved_icc == NULL || w->saved_icc[0] == '\000')
 		return NULL;
-	return strdup(w->dev->icc_path);
+	return strdup(w->saved_icc);
+}
+
+/* ------------------------------------------------------------------ */
+/* VideoLUT emulation. KWin applies the vcgt of the output's profile */
+/* after compositing, so loading a LUT means writing a profile with the */
+/* LUT as its vcgt and pointing KWin at it. Our surfaces are tagged with */
+/* the output's image description, so the rest of the profile doesn't */
+/* alter the test values, as long as its TRC is a pure power curve: KWin */
+/* encodes with the profile's TRC but describes the output to clients */
+/* with a power curve, so an sRGB style TRC with a linear toe crushes */
+/* the shadows. */
+
+#define WL_GEN_GAMMA 2.2
+
+/* Read the vcgt of the given profile into lut[], or a linear ramp if */
+/* path is NULL or the profile has none or can't be read (Argyll can't */
+/* read ICC V4 profiles). */
+static void wl_read_lut(dispwin *p, double lut[3][WL_LUT_SIZE], char *path) {
+	icmErr err = { 0, { '\000'} };
+	icmFile *fp = NULL;
+	icc *icco = NULL;
+	icmVideoCardGamma *wo;
+	int i, j, got = 0;
+
+	if (path != NULL && path[0] != '\000'
+	 && (fp = new_icmFileStd_name(&err, path, "r")) != NULL
+	 && (icco = new_icc(&err)) != NULL
+	 && icco->read(icco, fp, 0) == 0
+	 && (wo = (icmVideoCardGamma *)icco->read_tag(icco, icSigVideoCardGammaTag)) != NULL
+	 && wo->ttype == icSigVideoCardGammaType) {
+		int nch = (wo->tagType == icVideoCardGammaTable && wo->u.table.channels == 1) ? 1 : 3;
+		for (j = 0; j < 3; j++)
+			for (i = 0; i < WL_LUT_SIZE; i++)
+				lut[j][i] = wo->lookup(wo, nch == 1 ? 0 : j, i/(WL_LUT_SIZE-1.0));
+		got = 1;
+	} else if (path != NULL && path[0] != '\000') {
+		debugr2((errout, "wl_read_lut: no readable vcgt in '%s', assuming linear\n", path));
+	}
+	if (icco != NULL)
+		icco->del(icco);
+	if (fp != NULL)
+		fp->del(fp);
+
+	if (!got) {
+		for (j = 0; j < 3; j++)
+			for (i = 0; i < WL_LUT_SIZE; i++)
+				lut[j][i] = i/(WL_LUT_SIZE-1.0);
+	}
+}
+
+/* Write a display profile with sRGB colorants, a pure gamma TRC and */
+/* the given LUT as its vcgt. Return nz on failure. */
+static int wl_write_lut_profile(dispwin *p, char *path, ramdac *r) {
+	/* sRGB colorants and white, as in ref/sRGB.icm */
+	static double wtpt[3] = { 0.95045471, 1.00000000, 1.08905029 };
+	static double cols[3][3] = {
+		{ 0.43603516, 0.22248840, 0.01391602 },
+		{ 0.38511658, 0.71690369, 0.09706116 },
+		{ 0.14305115, 0.06060791, 0.71392822 }
+	};
+	static icTagSignature colsig[3] = { icSigRedColorantTag, icSigGreenColorantTag,
+	                                    icSigBlueColorantTag };
+	static icTagSignature trcsig[3] = { icSigRedTRCTag, icSigGreenTRCTag, icSigBlueTRCTag };
+	icmErr err = { 0, { '\000'} };
+	icmFile *fp;
+	icc *icco;
+	int i, j, rv;
+
+	if ((icco = new_icc(&err)) == NULL)
+		return 1;
+	icco->set_version(icco, ICMTV_22);
+	icco->header->deviceClass     = icSigDisplayClass;
+	icco->header->colorSpace      = icSigRgbData;
+	icco->header->pcs             = icSigXYZData;
+	icco->header->renderingIntent = icRelativeColorimetric;
+	icco->header->platform        = icmSig_nix;
+
+	{
+		icmCommonTextDescription *wo;
+		char *desc = "ArgyllCMS VideoLUT";
+		if ((wo = (icmCommonTextDescription *)icco->add_tag(icco, icSigProfileDescriptionTag,
+		                                      icmSigCommonTextDescriptionType)) == NULL)
+			goto fail;
+		wo->count = strlen(desc)+1;
+		wo->allocate(wo);
+		strcpy(wo->desc, desc);
+	}
+	{
+		icmCommonTextDescription *wo;
+		char *crt = "Generated by ArgyllCMS to load a calibration on Wayland";
+		if ((wo = (icmCommonTextDescription *)icco->add_tag(icco, icSigCopyrightTag,
+		                                      icmSigCommonTextDescriptionType)) == NULL)
+			goto fail;
+		wo->count = strlen(crt)+1;
+		wo->allocate(wo);
+		strcpy(wo->desc, crt);
+	}
+	{
+		icmXYZArray *wo;
+		if ((wo = (icmXYZArray *)icco->add_tag(icco, icSigMediaWhitePointTag,
+		                                       icSigXYZArrayType)) == NULL)
+			goto fail;
+		wo->count = 1;
+		wo->allocate(wo);
+		wo->data[0].X = wtpt[0];
+		wo->data[0].Y = wtpt[1];
+		wo->data[0].Z = wtpt[2];
+	}
+	for (j = 0; j < 3; j++) {
+		icmXYZArray *wo;
+		icmCurve *wc;
+		if ((wo = (icmXYZArray *)icco->add_tag(icco, colsig[j], icSigXYZArrayType)) == NULL)
+			goto fail;
+		wo->count = 1;
+		wo->allocate(wo);
+		wo->data[0].X = cols[j][0];
+		wo->data[0].Y = cols[j][1];
+		wo->data[0].Z = cols[j][2];
+
+		if ((wc = (icmCurve *)icco->add_tag(icco, trcsig[j], icSigCurveType)) == NULL)
+			goto fail;
+		wc->ctype = icmCurveGamma;
+		wc->count = 1;
+		wc->allocate(wc);
+		wc->data[0] = WL_GEN_GAMMA;
+	}
+	{
+		icmVideoCardGamma *wo;
+		if ((wo = (icmVideoCardGamma *)icco->add_tag(icco, icSigVideoCardGammaTag,
+		                                             icSigVideoCardGammaType)) == NULL)
+			goto fail;
+		wo->tagType = icVideoCardGammaTable;
+		wo->u.table.channels = 3;
+		wo->u.table.entryCount = r->nent;
+		wo->u.table.entrySize = 2;
+		wo->allocate(wo);
+		for (j = 0; j < 3; j++) {
+			for (i = 0; i < r->nent; i++) {
+				double vv = r->v[j][i];
+				wo->u.table.data[j][i] = vv < 0.0 ? 0.0 : vv > 1.0 ? 1.0 : vv;
+			}
+		}
+	}
+
+	if ((fp = new_icmFileStd_name(&err, path, "w")) == NULL)
+		goto fail;
+	rv = icco->write(icco, fp, 0);
+	fp->del(fp);
+	if (rv != 0) {
+		debugr2((errout, "wl_write_lut_profile: write failed: %s\n", icco->e.m));
+		unlink(path);
+		goto fail;
+	}
+	icco->del(icco);
+	return 0;
+
+  fail:
+	debugr2((errout, "wl_write_lut_profile: creating '%s' failed\n", path));
+	icco->del(icco);
+	return 1;
+}
+
+int wl_dispwin_get_lut(dispwin *p, double *v[3]) {
+	wlwin *w = p->wl;
+	double lut[3][WL_LUT_SIZE];
+	char *path = NULL;
+	int i, j;
+
+	if (w == NULL || w->dev == NULL || p->nent != WL_LUT_SIZE)
+		return 1;
+
+	if (w->dev->cps == KDE_CPS_ICC)
+		path = w->dev->icc_path;
+	wl_read_lut(p, lut, path);
+	for (j = 0; j < 3; j++)
+		for (i = 0; i < WL_LUT_SIZE; i++)
+			v[j][i] = lut[j][i];
+	return 0;
+}
+
+int wl_dispwin_set_lut(dispwin *p, ramdac *r, int persist) {
+	wlwin *w = p->wl;
+	char **paths = NULL, name[100], *path;
+	unsigned int hash = 2166136261u;		/* FNV-1a */
+	xdg_error er;
+	int i, j, isbase = 1;
+
+	if (w == NULL || w->dev == NULL || r->nent != WL_LUT_SIZE)
+		return 1;
+
+	for (j = 0; j < 3; j++) {
+		for (i = 0; i < r->nent; i++) {
+			unsigned int q = (unsigned int)(r->v[j][i] * 65535.0 + 0.5);
+			hash = (hash ^ (q & 0xff)) * 16777619u;
+			hash = (hash ^ (q >> 8)) * 16777619u;
+			if (fabs(r->v[j][i] - w->base_lut[j][i]) > 1e-4)
+				isbase = 0;
+		}
+	}
+
+	/* Going back to the LUT the saved state gives (e.g. restoring the */
+	/* original LUT on exit) just means restoring the saved state */
+	if (isbase && !persist) {
+		if (w->lut_active) {
+			if (wl_apply_config(p, w->saved_cps, -1, wl_restore_path(w)) != 0)
+				return 1;
+			w->lut_active = 0;
+			if (w->gen_path != NULL && (w->saved_icc == NULL
+			                         || strcmp(w->gen_path, w->saved_icc) != 0))
+				unlink(w->gen_path);
+			free(w->gen_path);
+			w->gen_path = NULL;
+		}
+		return 0;
+	}
+
+	/* Name by content, because KWin may not re-read a profile whose */
+	/* path hasn't changed */
+	snprintf(name, sizeof(name), WL_LUT_DIR "/vcgt-%.8s-%08x.icc",
+	         w->dev->uuid != NULL ? w->dev->uuid : "output", hash);
+	if (xdg_bds(&er, &paths, xdg_data, xdg_write, xdg_user, xdg_none, name) < 1) {
+		debugr2((errout, "wl_dispwin_set_lut: no place for '%s': %s\n", name, xdg_errstr(er)));
+		return 1;
+	}
+	if ((path = strdup(paths[0])) == NULL) {
+		xdg_free(paths, 1);
+		return 1;
+	}
+	xdg_free(paths, 1);
+
+	if (access(path, R_OK) != 0 && wl_write_lut_profile(p, path, r) != 0) {
+		free(path);
+		return 1;
+	}
+	if (wl_apply_config(p, KDE_CPS_ICC, -1, path) != 0) {
+		free(path);
+		return 1;
+	}
+	debugr2((errout, "wl_dispwin_set_lut: KWin now using '%s'%s\n", path,
+	         persist ? " (persistent)" : ""));
+
+	/* The previous temporary profile is no longer referenced */
+	if (w->gen_path != NULL && strcmp(w->gen_path, path) != 0
+	 && (w->saved_icc == NULL || strcmp(w->gen_path, w->saved_icc) != 0))
+		unlink(w->gen_path);
+	free(w->gen_path);
+	w->gen_path = path;
+
+	if (persist) {
+		char *old = w->saved_icc;
+
+		w->saved_cps = KDE_CPS_ICC;
+		w->saved_icc = strdup(path);
+		if (wl_is_gen_path(old) && strcmp(old, path) != 0)
+			unlink(old);
+		free(old);
+		for (j = 0; j < 3; j++)
+			for (i = 0; i < WL_LUT_SIZE; i++)
+				w->base_lut[j][i] = r->v[j][i];
+		w->lut_active = 0;
+	} else {
+		w->lut_active = 1;
+	}
+	return 0;
 }

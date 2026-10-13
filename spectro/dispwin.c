@@ -1645,10 +1645,40 @@ static ramdac *dispwin_get_ramdac(dispwin *p) {
 #endif	/* UNXI X11 */
 
 #if defined(UNIX_WAYLAND)
-	/* No Wayland protocol gives clients the gamma ramps, */
-	/* and KWin doesn't offer them over D-Bus either */
-	debugr("dispwin_get_ramdac: no VideoLUT access on Wayland\n");
-	return NULL;
+	/* No Wayland protocol gives clients the gamma ramps, so the LUT */
+	/* is the vcgt of the profile KWin is using for the output */
+	debugr("dispwin_get_ramdac called\n");
+
+	if (p->nent == 0) {
+		debugr("dispwin_get_ramdac: no VideoLUT emulation for this output\n");
+		return NULL;
+	}
+	if ((r = (ramdac *)calloc(sizeof(ramdac), 1)) == NULL) {
+		debugr("dispwin_get_ramdac failed on malloc()\n");
+		return NULL;
+	}
+	r->fdepth = p->fdepth;
+	r->rdepth = p->rdepth;
+	r->ndepth = p->ndepth;
+	r->nent   = p->nent;
+	r->clone  = dispwin_clone_ramdac;
+	r->setlin = dispwin_setlin_ramdac;
+	r->sane   = dispwin_sane_ramdac;
+	r->del =    dispwin_del_ramdac;
+	for (j = 0; j < 3; j++) {
+		if ((r->v[j] = (double *)calloc(sizeof(double), r->nent)) == NULL) {
+			for (j--; j >= 0; j--)
+				free(r->v[j]);
+			free(r);
+			debugr("dispwin_get_ramdac failed on malloc()\n");
+			return NULL;
+		}
+	}
+	if (wl_dispwin_get_lut(p, r->v) != 0) {
+		r->del(r);
+		debugr("dispwin_get_ramdac: reading the output's LUT failed\n");
+		return NULL;
+	}
 #endif /* UNIX_WAYLAND */
 
 	debugr("dispwin_get_ramdac returning OK\n");
@@ -1943,8 +1973,12 @@ static int dispwin_set_ramdac(dispwin *p, ramdac *r, int persist) {
 	}
 
 #if defined(UNIX_WAYLAND)
-	debugr("dispwin_set_ramdac: no VideoLUT access on Wayland\n");
-	return 1;
+	if (wl_dispwin_set_lut(p, r, persist) != 0) {
+		debugr("dispwin_set_ramdac: loading the LUT through KWin failed\n");
+		return 1;
+	}
+	debugr("dispwin_set_ramdac returning OK\n");
+	return 0;
 #endif /* UNIX_WAYLAND */
 
 #ifdef NT
@@ -3408,6 +3442,11 @@ int dispwin_uninstall_profile(dispwin *p, char *fname, p_scope scope) {
 			debugr2((errout,"Resetting the compositor's output profile failed\n"));
 			return 1;
 		}
+		/* Without a profile KWin applies no vcgt, so the LUT is now linear. */
+		/* Restoring the LUT saved at startup on exit would bring back the */
+		/* uninstalled profile's curves. */
+		if (p->or != NULL)
+			p->or->setlin(p->or);
 #endif /* UNIX_WAYLAND */
 		return 0;
 	}
@@ -7381,6 +7420,15 @@ main(int argc, char *argv[]) {
 				dw->or->del(dw->or);
 			if ((dw->or = dw->r->clone(dw->r)) == NULL)
 				error("Failed to clone VideoLUT - memory ?");
+#if defined(UNIX_WAYLAND)
+			/* KWin applies the installed profile's vcgt itself. Loading it as */
+			/* a generated LUT profile would replace the profile, and with it */
+			/* the color management KWin does for other applications. */
+			if (loadprofile && dw->wl != NULL) {
+				if (wl_dispwin_set_profile(dw, calname) != 0)
+					error("Failed to make the compositor use '%s'",calname);
+			} else
+#endif
 			if ((rv = dw->set_ramdac(dw,dw->or,1)) != 0) {
 				if (rv == 2)
 					error("Failed to set VideoLUTs persistently because current System Profile can't be renamed");

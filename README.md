@@ -28,18 +28,27 @@ To build the original X11 version instead:
   been shown on screen before it starts the settling delay.
 - While measuring, KWin Night Light is suspended and the screen is kept from
   blanking.
-- When Argyll asks for the display's native response, the output's color
-  profile is switched off for the run and restored afterwards.
+- Wayland doesn't let applications load the video card's calibration tables
+  (VideoLUT). Instead, Argyll loads calibration curves by having KWin use a
+  small generated profile that carries them, so `dispcal` can calibrate as
+  well as profile. Temporary changes are undone when Argyll exits, and
+  `dispwin` can still load a calibration that stays in effect.
 - Installing a profile makes KWin use it for that output, including its
   calibration curves.
+- If the instrument stops responding, when it's opened or in the middle of
+  a run, Argyll pauses for a few seconds and reconnects to it, as the
+  instrument makers' own software does.
+
+## Troubleshooting
+
+- Some older instruments (seen with an i1Display Pro) lose data on the USB
+  ports of modern laptops, which shows up as repeated reconnects. A powered
+  USB 2.0 hub between the laptop and the instrument fixes this.
 
 ## Limitations
 
-- Applications can't load the video card's calibration tables (VideoLUT) on
-  Wayland. `dispcal` can therefore only profile the display as it is. It can't
-  build calibration curves, and it warns about this.
 - If Argyll is killed outright (`kill -9`) during a measurement, the output may
-  be left with its color profile switched off. Re-select the profile in System
-  Settings > Display & Monitor.
+  be left using a temporary calibration profile. Re-select your profile in
+  System Settings > Display & Monitor.
 - The patch window doesn't work on X11 sessions or on compositors other than
   KWin.

@@ -214,6 +214,135 @@ inst_code setup_display_calibrate(
 }
 
 /* -------------------------------------------------------- */
+/* Some instruments (seen with an i1Display Pro) intermittently fail to */
+/* initialise, and then work when tried again a moment later. */
+/* Some need several seconds before they respond again, so back off. */
+#define INST_OPEN_TRIES 6
+static int inst_open_delay[INST_OPEN_TRIES-1] = { 1000, 2000, 3000, 5000, 8000 };	/* msec */
+
+/* Create an instrument, establish communications and initialise it, */
+/* retrying failures that may be transient. Return NULL on failure, */
+/* with *prv set to the last error (inst_ok if new_inst() failed). */
+static inst *open_inst_retry(icompath *ipath, baud_rate br, flow_control fc,
+                             a1log *log, inst_code *prv) {
+	inst *it;
+	inst_code rv = inst_ok;
+	int i;
+
+	for (i = 0; ; i++) {
+		if ((it = new_inst(ipath, 0, log, DUIH_FUNC_AND_CONTEXT)) == NULL) {
+			a1logd(log,1,"open_inst_retry: new_inst failed\n");
+			*prv = inst_ok;
+			return NULL;
+		}
+		if ((rv = it->init_coms(it, br, fc, 15.0)) != inst_ok) {
+			a1logd(log,1,"init_coms returned '%s' (%s)\n",
+			       it->inst_interp_error(it, rv), it->interp_error(it, rv));
+		} else if ((rv = it->init_inst(it)) != inst_ok) {
+			a1logd(log,1,"init_inst returned '%s' (%s)\n",
+			       it->inst_interp_error(it, rv), it->interp_error(it, rv));
+		} else {
+			*prv = inst_ok;
+			return it;
+		}
+		it->del(it);
+
+		/* Only failures a retry might fix */
+		if (i + 1 >= INST_OPEN_TRIES
+		 || ((rv & inst_mask) != inst_coms_fail
+		  && (rv & inst_mask) != inst_protocol_error
+		  && (rv & inst_mask) != inst_hardware_fail)
+		 || (rv & inst_imask) == SPYD2_NO_PLD_PATTERN)
+			break;
+
+		a1logv(log, 1, "Instrument didn't respond, trying again in %d seconds\n",
+		       inst_open_delay[i]/1000);
+		msec_sleep(inst_open_delay[i]);
+	}
+	*prv = rv;
+	return NULL;
+}
+
+static int config_inst_displ(disprd *p);
+
+/* Automatic reconnects allowed for one reading before asking the user */
+#define DISPRD_MAX_REOPEN 3
+
+/* Pause before each of those reconnects. These instruments can take */
+/* seconds to recover from an error; the vendor software was seen to */
+/* stall for around 10 seconds and then carry on. */
+static int disprd_reopen_delay[DISPRD_MAX_REOPEN] = { 2000, 5000, 10000 };
+
+/* Reopen the instrument after a communication failure, attempt being */
+/* 0 .. DISPRD_MAX_REOPEN-1. A USB read error leaves the connection */
+/* unusable (reading again on it fails too), but a fresh open recovers */
+/* it. Return nz on failure, leaving p->it NULL. */
+static int disprd_reopen_inst(disprd *p, int attempt) {
+	inst2_capability cap2;
+	inst_code rv;
+	icompaths *icmps;
+	icompath *path = NULL;
+	unsigned int vid = 0, pid = 0;
+	char *spath = NULL;
+	int i;
+
+	/* Find the instrument again by what it is rather than by p->ipath, */
+	/* which points into the caller's path list (freed once new_disprd() */
+	/* returns), and because the device may come back at a new address. */
+	if (p->it != NULL) {
+#ifdef ENABLE_USB
+		vid = p->it->icom->vid;
+		pid = p->it->icom->pid;
+#endif
+#if defined(ENABLE_SERIAL) || defined(ENABLE_FAST_SERIAL)
+		if (p->it->icom->spath != NULL)
+			spath = strdup(p->it->icom->spath);
+#endif
+		p->it->del(p->it);
+		p->it = NULL;
+	}
+
+	if (attempt >= DISPRD_MAX_REOPEN)
+		attempt = DISPRD_MAX_REOPEN-1;
+	msec_sleep(disprd_reopen_delay[attempt]);
+
+	if ((icmps = new_icompaths(p->log)) == NULL) {
+		free(spath);
+		return 1;
+	}
+	for (i = 0; i < icmps->npaths && path == NULL; i++) {
+		icompath *pp = icmps->paths[i];
+#ifdef ENABLE_USB
+		if (vid != 0 && pp->vid == vid && pp->pid == pid)
+			path = pp;
+#endif
+#if defined(ENABLE_SERIAL) || defined(ENABLE_FAST_SERIAL)
+		if (spath != NULL && pp->spath != NULL && strcmp(pp->spath, spath) == 0)
+			path = pp;
+#endif
+	}
+	free(spath);
+	if (path == NULL) {
+		a1logd(p->log,1,"disprd_reopen_inst: the instrument has gone away\n");
+		icmps->del(icmps);
+		return 1;
+	}
+
+	/* (The new instrument keeps its own copy of the path) */
+	p->it = open_inst_retry(path, p->br, p->fc, p->log, &rv);
+	icmps->del(icmps);
+	if (p->it == NULL)
+		return 1;
+	if (config_inst_displ(p) != 0)
+		return 1;
+
+	p->it->capabilities(p->it, NULL, &cap2, NULL);
+	if (cap2 & inst2_has_target)
+		p->it->get_set_opt(p->it, inst_opt_set_target_state, 1);
+	return 0;
+}
+
+/* -------------------------------------------------------- */
 /* User requested calibration of the display instrument */
 /* Do all available non-deferrable calibrations. */
 /* Should add an argument to be able to select type of calibration, */
@@ -275,28 +404,10 @@ a1log *log				/* Verb, debug & error log */
 
 	a1logv(log, 1, "Setting up the instrument\n");
 
-	if ((p = new_inst(ipath, 0, log, DUIH_FUNC_AND_CONTEXT)) == NULL) {
-		a1logd(log, 1, "new_inst failed\n");
+	if ((p = open_inst_retry(ipath, br, fc, log, &rv)) == NULL)
 		return -1;
-	}
 
 	p->log = new_a1log_d(log);
-
-	/* Establish communications */
-	if ((rv = p->init_coms(p, br, fc, 15.0)) != inst_ok) {
-		a1logd(p->log, 1, "init_coms returned '%s' (%s)\n",
-		       p->inst_interp_error(p, rv), p->interp_error(p, rv));
-		p->del(p);
-		return -1;
-	}
-
-	/* Initialise the instrument */
-	if ((rv = p->init_inst(p)) != inst_ok) {
-		a1logd(log,1,"init_inst returned '%s' (%s)\n",
-		       p->inst_interp_error(p, rv), p->interp_error(p, rv));
-		p->del(p);
-		return -1;
-	}
 
 // ~~~~9999 we should call config_inst_displ(p) instead of badly duplicating
 //  the instrument setup here ???
@@ -476,6 +587,7 @@ static int disprd_read_imp(
 	int patch;
 	ipatch val;		/* Return value */
 	int ch;			/* Character */
+	int nreopen;		/* Automatic instrument reconnects for this patch */
 	int cal_type;
 	inst_calc_id_type idtype;
 	char id[CALIDLEN];
@@ -639,6 +751,8 @@ static int disprd_read_imp(
 			return 3;
 		}
 
+		nreopen = 0;
+
 		/* Until we give up retrying */
 		for (;;) {
 			val.mtype = inst_mrt_none;
@@ -721,7 +835,27 @@ static int disprd_read_imp(
 
 				/* Deal with a communications error */
 				} else if ((rv & inst_mask) == inst_coms_fail) {
+					int slowserial = (p->it->icom->port_type(p->it->icom) & icomt_serial)
+					           && !(p->it->icom->port_attr(p->it->icom) & icomt_fastserial);
+
 					empty_con_chars();
+
+					if (!slowserial && nreopen < DISPRD_MAX_REOPEN) {
+						printf("\nSample read failed due to communication problem.\n");
+						/* A failed reconnect moves on to the next, longer pause */
+						while (nreopen < DISPRD_MAX_REOPEN) {
+							printf("Reconnecting to the instrument in %d seconds\n",
+							       disprd_reopen_delay[nreopen]/1000);
+							if (disprd_reopen_inst(p, nreopen++) == 0)
+								break;
+						}
+						if (p->it == NULL) {
+							printf("Reconnecting to the instrument failed\n");
+							return 2;
+						}
+						continue;
+					}
+
 					printf("\nSample read failed due to communication problem.\n");
 					printf("Hit Esc or Q to give up, any other key to retry:%s",fl_end); do_fflush();
 					if ((ch = next_con_char()) == 0x1b || ch == 0x3 || ch == 'q' || ch == 'Q') {
@@ -729,8 +863,14 @@ static int disprd_read_imp(
 						return 1;
 					}
 					printf("\n");
-					if ((p->it->icom->port_type(p->it->icom) & icomt_serial)
-					 && !(p->it->icom->port_attr(p->it->icom) & icomt_fastserial)) {
+					if (!slowserial) {
+						if (disprd_reopen_inst(p, DISPRD_MAX_REOPEN-1) != 0) {
+							printf("Reconnecting to the instrument failed\n");
+							return 2;
+						}
+						continue;
+					}
+					{
 						/* Allow retrying at a lower baud rate */
 						int tt = p->it->last_scomerr(p->it);
 						if (tt & (ICOM_BRK | ICOM_FER | ICOM_PER | ICOM_OER)) {
@@ -745,6 +885,9 @@ static int disprd_read_imp(
 							return 2;
 						}
 					}
+					/* (Upstream fell through to the error below, so a retry */
+					/* never actually retried) */
+					continue;
 				}
 			    printf("\nSample read failed with unhandled error.\n");
 				return 2;
@@ -2648,28 +2791,8 @@ a1log *log      	/* Verb, debug & error log */
 	
 		a1logv(p->log, 1, "Setting up the instrument\n");
 	
-		if ((p->it = new_inst(ipath, 0, log, DUIH_FUNC_AND_CONTEXT)) == NULL) {
-			a1logd(p->log,1,"new_disprd failed because new_inst failed\n");
-			p->del(p);
-			if (errc != NULL) *errc = 2;
-			return NULL;
-		}
-	
-		/* Establish communications */
-		if ((rv = p->it->init_coms(p->it, p->br, p->fc, 15.0)) != inst_ok) {
-			a1logd(log,1,"init_coms returned '%s' (%s)\n",
-			       p->it->inst_interp_error(p->it, rv), p->it->interp_error(p->it, rv));
-			a1logd(log,1,"new_disprd failed because init_coms failed\n");
-			p->del(p);
-			if (errc != NULL) *errc = 2;
-			return NULL;
-		}
-	
-		/* Initialise the instrument */
-		if ((rv = p->it->init_inst(p->it)) != inst_ok) {
-			a1logd(log,1,"init_inst returned '%s' (%s)\n",
-			       p->it->inst_interp_error(p->it, rv), p->it->interp_error(p->it, rv));
-			a1logd(log,1,"new_disprd failed because init_inst failed\n");
+		if ((p->it = open_inst_retry(ipath, p->br, p->fc, log, &rv)) == NULL) {
+			a1logd(log,1,"new_disprd failed because the instrument couldn't be opened\n");
 			p->del(p);
 			if (errc != NULL) {
 				*errc = 2;
