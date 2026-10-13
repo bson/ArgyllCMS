@@ -18,6 +18,11 @@
 /* description of the platform, or of what's missing. */
 int wl_check_platform(char *msg, int len);
 
+/* Name the Wayland compositor of this session, e.g. "KWin" or "GNOME */
+/* Shell", or the process name for others, or "unknown". Return 0, with */
+/* name unset, if there's no Wayland compositor to connect to. */
+int wl_compositor_name(char *name, int len);
+
 /* Return a NULL terminated list of the enabled outputs, primary first. */
 /* Return NULL on failure. */
 disppath **wl_get_displays(void);

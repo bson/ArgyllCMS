@@ -1,23 +1,51 @@
 # Implementation summary
 
 Details of the Wayland port, relative to the upstream ArgyllCMS 3.5.0 import
-(the first commit).
+(the first commit). Builds contain both the Wayland and the original X11
+display code, and each program picks one when it runs.
 
 ## Build switches
 
-- `Jamtop`: `USE_WAYLAND ?= true` (non-Apple Unix). When true it adds
+- `Jamtop`: `USE_WAYLAND ?= true` and `USE_X11 ?= true` (non-Apple Unix),
+  independent; both false is an error. `USE_WAYLAND` adds
   `DEFINES += UNIX_WAYLAND`, finds the libdbus include dirs by `GLOB` (jam
   can't run pkg-config), checks for the wayland-protocols and
   plasma-wayland-protocols XML dirs (`WLPROTO_SYS`, `WLPROTO_KDE`, by default
-  the copies in `wlproto/`, overridable with `-s`), and links `-lwayland-client -ldbus-1` in place of the X libs.
-  `?=` is deliberate so that `-sUSE_WAYLAND=false` on the command line wins.
+  the copies in `wlproto/`, overridable with `-s`), and links
+  `-lwayland-client -ldbus-1`. `USE_X11` finds the X headers and libraries as
+  upstream did and links the X libs; when false it adds
+  `DEFINES += NO_X11_DISP`. `LibWinH` collects both sets of include dirs.
+  `?=` is deliberate so that `-s` on the command line wins.
 - `Jamtop`: rule `WaylandProtocol basename : file.xml ;` generates
   `basename.h`/`basename.c` with `wayland-scanner` (client-header,
   private-code) in the current directory.
 - `h/aconfig.h`: `UNIX_X11_DISP` is defined when `UNIX_X11` is and
-  `UNIX_WAYLAND` isn't. `UNIX_X11` stays defined on Wayland builds because the
-  Linux USB/HID code, `USE_UCMM` and the ICC header platform depend on it. All
-  Xlib display code is now under `UNIX_X11_DISP`.
+  `NO_X11_DISP` isn't. `UNIX_X11` stays defined on Wayland-only builds because
+  the Linux USB/HID code, `USE_UCMM` and the ICC header platform depend on it.
+  All Xlib display code is under `UNIX_X11_DISP`.
+
+## Choosing Wayland or X11 at run time
+
+- `dispwin_wayland()` (`dispwin.c`, declared in `dispwin.h`; a constant macro
+  in single-backend builds) decides once per process, so displays listed by
+  one are never opened by the other: `ARGYLL_WINDOW_SYSTEM=x11|wayland` if
+  set; X11 without `WAYLAND_DISPLAY`; Wayland if `wl_check_platform()` passes
+  (KWin); otherwise X11 (XWayland on GNOME and other compositors), unless
+  `DISPLAY` is unset too, in which case Wayland, so the error names what the
+  compositor lacks. That automatic part is `dispwin_wayland_auto()`, which
+  `dispwin -Q` also reports.
+- Every Wayland block in `dispwin.c` is a run-time branch on it, placed
+  before the X11 code and returning or skipping it with `} else`; the X11
+  code itself is as upstream. Functions guarded only by `p->wl` or
+  `p->mydisplay` NULL checks (`dispwin_del()`, `-L` in `main()`) are left as
+  they were.
+- `plot.c` decides separately (`plot_wayland()`): the same override and
+  `WAYLAND_DISPLAY`/`DISPLAY` tests, then Wayland only if the compositor offers
+  `zxdg_decoration_manager_v1`, as without it (GNOME) the plot window would
+  have no title bar; X11 through XWayland gets one from the window manager.
+  The implementations are `x11_do_plot_imp()` and `wl_do_plot_imp()`, behind
+  a `do_plot_imp()` dispatcher. `wlp_connect(quiet)` returns NULL instead of
+  exiting when probing.
 - `Jamfile`: the bundled zlib test used `HAVE_ZLIB`, but `Jamtop` sets
   `HAVE_Z`, so the bundled copy was always built (and fails with GCC 16).
   Fixed to test `HAVE_Z`.
@@ -130,18 +158,45 @@ the LUT as a 256 entry vcgt, and points KWin at it in ICC mode.
 
 ## Platform check for front ends
 
-`dispwin -Q` prints one line, `platform supported: <what>` or
-`platform unsupported: <why>`, and exits 0 or 1. It runs right after option
-parsing, before any display is opened, since opening one fails on a platform
-the build doesn't support. It reports `dispwin_check_platform()`
-(`dispwin.c`): on Wayland builds `wl_check_platform()`, which connects to the
-compositor and requires `wl_compositor`, `wl_subcompositor`,
-`zwlr_layer_shell_v1`, `wp_viewporter`, `wp_single_pixel_buffer_manager_v1`,
-`wp_color_manager_v1`, `kde_output_device_v2` devices and
-`kde_output_management_v2` v8+, naming whatever is missing. X11 builds check
-that the X display opens; Windows and macOS builds report supported.
-Without `WAYLAND_DISPLAY`, libwayland tries the default `wayland-0` socket, so
-in a Plasma session it still connects; an X11 session has no such socket.
+`dispwin -Q` (`dispwin_report_platform()`) describes the session, one
+`key: value` per line, and exits 0 if the platform is supported (perhaps
+limited) or 1 if not. It runs right after option parsing, before any display
+is opened, since opening one fails on a platform the build doesn't support.
+
+    desktop: KDE                      $XDG_CURRENT_DESKTOP, or unknown
+    wayland compositor: KWin          or none
+    x11 server: XWayland :0           Xorg :0, another vendor's name, or none
+    x11 window manager: KWin          or none
+    automatic display system: wayland
+    display system: x11 (ARGYLL_WINDOW_SYSTEM)
+    platform limited: X11 through XWayland :0 on KWin: ...
+
+- The compositor (`wl_compositor_name()`, `dispwin_wl.c`): Wayland has no
+  protocol for it, so it's the process at the other end of the socket
+  (`SO_PEERCRED`, Linux only, with a local copy of `struct ucred`, which
+  glibc only declares with `_GNU_SOURCE`), named from argv[0] in
+  `/proc/<pid>/cmdline` (`comm` is cut at 15 characters). For KWin that's
+  `kwin_wayland_wrapper`, which owns the listening socket. Known names are
+  mapped (KWin, GNOME Shell, Mutter, Sway, Hyprland, Weston, COSMIC); others
+  are printed as they are. Only tried with `WAYLAND_DISPLAY` set, as
+  libwayland would otherwise try `wayland-0`, which in an X11 session may
+  be another session's.
+- The X server and window manager (`x11_describe()`, `dispwin.c`): XWayland
+  by its `XWAYLAND` extension, Xorg by vendor string; the window manager's
+  `_NET_WM_NAME` on the EWMH `_NET_SUPPORTING_WM_CHECK` window, read with
+  the null error handler in case that window is stale.
+- Single-backend builds print `unknown` for what they can't look into.
+- The last line is `dispwin_check_platform()`, which returns 0
+  (unsupported), 1 (supported) or 2 (limited). Wayland:
+  `wl_check_platform()`, which connects to the compositor and requires
+  `wl_compositor`, `wl_subcompositor`, `zwlr_layer_shell_v1`,
+  `wp_viewporter`, `wp_single_pixel_buffer_manager_v1`,
+  `wp_color_manager_v1`, `kde_output_device_v2` devices and
+  `kde_output_management_v2` v8+, naming whatever is missing. X11:
+  unsupported if the display won't open; limited through XWayland, as the
+  compositor may color manage the test patch window and X11 gamma ramps
+  aren't applied; otherwise supported, e.g. `X11 (Xorg :0, window manager
+  KWin)`. Windows and macOS builds report supported.
 
 ## spectro/dispwin.c, dispwin.h
 
@@ -163,8 +218,10 @@ in a Plasma session it still connects; an X11 session has no such socket.
   KWin applies no vcgt without a profile, so the exit restore doesn't bring
   back the uninstalled profile's curves.
 - `main()`: `-display`, the `,m` VideoLUT screen of `-d n,m`, `-x` and `-X`
-  are X11-only. On Wayland `-x`/`-X` are unknown options, and `-d n,m` is
-  read as `-d n`. `-L` points KWin at the installed profile rather than
+  are X11-only. When Wayland is in use, `-x`/`-X` are an error (unknown
+  options in a Wayland-only build), `-d n,m` is read as `-d n`, and the
+  default display no longer comes from `DISPLAY`'s screen number (also in
+  dispcal, dispread and ccxxmake). `-L` points KWin at the installed profile rather than
   loading its vcgt as a generated profile, which would replace the profile
   KWin uses to color manage other applications.
 
@@ -199,8 +256,13 @@ all absorbed by the hub's retries. The software now rides out such errors:
 
 ## spectro/dispcal.c, dispread.c, ccxxmake.c
 
-Option handling for `-display`, `-d n,m` and `-n` (override redirect) moved
-under `UNIX_X11_DISP`. The ICC header platform stays under `UNIX_X11`.
+Option handling for `-display`, `-d n,m` and `-n` (override redirect) is
+under `UNIX_X11_DISP`; the `DISPLAY` screen-number default is skipped when
+`dispwin_wayland()`. The ICC header platform stays under `UNIX_X11`.
+The usage line for `-d` is ` -d n[,m]` in every Linux/BSD build (dispwin,
+dispcal, dispread, ccxxmake), as upstream's X11 builds print it, so front
+ends parse one format; without X11 the `,m` is accepted (`atoi` stops at
+the comma) and ignored.
 
 ## plot/plot.c, plot_font.h
 

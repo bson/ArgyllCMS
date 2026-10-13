@@ -119,8 +119,12 @@ void usage(int flag, char *diag, ...) {
 	fprintf(stderr," -v              Verbose mode\n");
 #if defined(UNIX_X11_DISP)
 	fprintf(stderr," -display displayname Choose X11 display name\n");
+#endif
+#if defined(UNIX_X11)
+	/* Also without X11, so every Linux/BSD build lists displays in the same */
+	/* format. ,m is then accepted and ignored. */
 	fprintf(stderr," -d n[,m]             Choose the display n from the following list (default 1)\n");
-	fprintf(stderr,"                      Optionally choose different display m for VideoLUT access\n"); 
+	fprintf(stderr,"                      Optionally choose different display m for VideoLUT access (X11)\n");
 #else
 	fprintf(stderr," -d n                 Choose the display from the following list (default 1)\n");
 #endif
@@ -670,7 +674,7 @@ int main(int argc, char *argv[]) {
 #if defined(UNIX_X11_DISP)
 		char *dn, *pp;
 
-		if ((dn = getenv("DISPLAY")) != NULL) {
+		if (!dispwin_wayland() && (dn = getenv("DISPLAY")) != NULL) {
 			if ((pp = strrchr(dn, ':')) != NULL) {
 				if ((pp = strchr(pp, '.')) != NULL) {
 					if (pp[1] != '\000')

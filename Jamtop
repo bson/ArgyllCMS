@@ -64,9 +64,11 @@ USE_CMFM = false ;
 # Compile in graph plotting code
 USE_PLOT = true ;		# [true] 
 
-# On Linux/BSD, use Wayland (KWin) rather than X11 for the test patch and
-# plot windows. ?= so that -sUSE_WAYLAND=false on the jam command line wins.
+# On Linux/BSD, the display systems the test patch and plot windows can
+# use: Wayland (KWin) and X11. With both, each program picks one when it
+# runs. ?= so that e.g. -sUSE_X11=false on the jam command line wins.
 USE_WAYLAND ?= true ;	# [true]
+USE_X11 ?= true ;		# [true]
 
 # Enable UTF-8 code pages on MSWindows V 1903 or later,
 # to make executable language handling consistent across MSWin/OS X/Linux
@@ -91,106 +93,115 @@ if $(UNIX) {
 		LINKFLAGS += -framework AppKit ;
 		LINKFLAGS += -framework AudioToolbox ;
 
-	} else if $(USE_WAYLAND) = true {
-		DEFINES += UNIX_WAYLAND ;
-
-		# Jam can't run pkg-config, so find the libdbus headers the same way
-		# as the X11 ones below. The second directory holds the arch-specific
-		# dbus-arch-deps.h.
-		if [ GLOB /usr/include/dbus-1.0/dbus : dbus.h ] {
-			LibWinH = /usr/include/dbus-1.0 ;
-		} else if [ GLOB /usr/local/include/dbus-1.0/dbus : dbus.h ] {
-			LibWinH = /usr/local/include/dbus-1.0 ;
-		} else {
-			EXIT Unable to locate the dbus-1 include files ;
-		}
-		if [ GLOB /usr/lib64/dbus-1.0/include/dbus : dbus-arch-deps.h ] {
-			LibWinH += /usr/lib64/dbus-1.0/include ;
-		} else if [ GLOB /usr/lib/x86_64-linux-gnu/dbus-1.0/include/dbus : dbus-arch-deps.h ] {
-			LibWinH += /usr/lib/x86_64-linux-gnu/dbus-1.0/include ;
-		} else if [ GLOB /usr/lib/aarch64-linux-gnu/dbus-1.0/include/dbus : dbus-arch-deps.h ] {
-			LibWinH += /usr/lib/aarch64-linux-gnu/dbus-1.0/include ;
-		} else if [ GLOB /usr/lib/dbus-1.0/include/dbus : dbus-arch-deps.h ] {
-			LibWinH += /usr/lib/dbus-1.0/include ;
-		} else if [ GLOB /usr/local/lib/dbus-1.0/include/dbus : dbus-arch-deps.h ] {
-			LibWinH += /usr/local/lib/dbus-1.0/include ;
-		} else {
-			EXIT Unable to locate dbus-arch-deps.h ;
-		}
-
-		# The protocol definitions are kept in wlproto/ (see its README),
-		# as some are newer than many distributions' packages; -s overrides
-		# them. Not anchored like DESTDIR: wayland-scanner runs from this
-		# top directory, where the path is right as it is.
-		WLPROTO_SYS ?= [ NormPaths wlproto/wayland-protocols ] ;
-		WLPROTO_KDE ?= [ NormPaths wlproto/plasma-wayland-protocols ] ;
-		if ! [ GLOB $(WLPROTO_SYS)/stable/xdg-shell : xdg-shell.xml ] {
-			EXIT Unable to locate the wayland-protocols XML files in $(WLPROTO_SYS) ;
-		}
-		if ! [ GLOB $(WLPROTO_KDE) : kde-output-device-v2.xml ] {
-			EXIT Unable to locate the plasma-wayland-protocols XML files in $(WLPROTO_KDE) ;
-		}
-
-		if $(OS) = FREEBSD {
-			LINKFLAGS += -g -lrt -lusb ;
-			GUILINKFLAGS += -L/usr/local/lib -lwayland-client -ldbus-1 ;
-		} else if $(OS) = OPENBSD {
-			GUILINKFLAGS += -L/usr/local/lib -lwayland-client -ldbus-1 ;
-		} else {
-			LINKFLAGS += -ldl -lrt ;
-			GUILINKFLAGS += -lwayland-client -ldbus-1 ;
-		}
-
-	# Hmm. Would be nice to use pkg-config here, if system has it.
 	} else {
-		if [ GLOB /usr/X11R6/include/X11 : X.h ] {
-			LibWinH = /usr/X11R6/include ;
-		} else if [ GLOB /usr/include/X11 : X.h ] {
-			LibWinH = /usr/include ;
-		} else if [ GLOB /usr/local/include/X11 : X.h ] {
-			LibWinH = /usr/local/include ;
-		} else {
-			EXIT Unable to locate the X11 include files ;
+		if $(USE_WAYLAND) != true && $(USE_X11) != true {
+			EXIT Both USE_WAYLAND and USE_X11 are false, so there is no display support ;
+		}
+		LibWinH = ;
+
+		if $(USE_WAYLAND) = true {
+			DEFINES += UNIX_WAYLAND ;
+
+			# Jam can't run pkg-config, so find the libdbus headers the same way
+			# as the X11 ones below. The second directory holds the arch-specific
+			# dbus-arch-deps.h.
+			if [ GLOB /usr/include/dbus-1.0/dbus : dbus.h ] {
+				LibWinH = /usr/include/dbus-1.0 ;
+			} else if [ GLOB /usr/local/include/dbus-1.0/dbus : dbus.h ] {
+				LibWinH = /usr/local/include/dbus-1.0 ;
+			} else {
+				EXIT Unable to locate the dbus-1 include files ;
+			}
+			if [ GLOB /usr/lib64/dbus-1.0/include/dbus : dbus-arch-deps.h ] {
+				LibWinH += /usr/lib64/dbus-1.0/include ;
+			} else if [ GLOB /usr/lib/x86_64-linux-gnu/dbus-1.0/include/dbus : dbus-arch-deps.h ] {
+				LibWinH += /usr/lib/x86_64-linux-gnu/dbus-1.0/include ;
+			} else if [ GLOB /usr/lib/aarch64-linux-gnu/dbus-1.0/include/dbus : dbus-arch-deps.h ] {
+				LibWinH += /usr/lib/aarch64-linux-gnu/dbus-1.0/include ;
+			} else if [ GLOB /usr/lib/dbus-1.0/include/dbus : dbus-arch-deps.h ] {
+				LibWinH += /usr/lib/dbus-1.0/include ;
+			} else if [ GLOB /usr/local/lib/dbus-1.0/include/dbus : dbus-arch-deps.h ] {
+				LibWinH += /usr/local/lib/dbus-1.0/include ;
+			} else {
+				EXIT Unable to locate dbus-arch-deps.h ;
+			}
+
+			# The protocol definitions are kept in wlproto/ (see its README),
+			# as some are newer than many distributions' packages; -s overrides
+			# them. Not anchored like DESTDIR: wayland-scanner runs from this
+			# top directory, where the path is right as it is.
+			WLPROTO_SYS ?= [ NormPaths wlproto/wayland-protocols ] ;
+			WLPROTO_KDE ?= [ NormPaths wlproto/plasma-wayland-protocols ] ;
+			if ! [ GLOB $(WLPROTO_SYS)/stable/xdg-shell : xdg-shell.xml ] {
+				EXIT Unable to locate the wayland-protocols XML files in $(WLPROTO_SYS) ;
+			}
+			if ! [ GLOB $(WLPROTO_KDE) : kde-output-device-v2.xml ] {
+				EXIT Unable to locate the plasma-wayland-protocols XML files in $(WLPROTO_KDE) ;
+			}
+
+			if $(OS) = FREEBSD || $(OS) = OPENBSD {
+				GUILINKFLAGS += -L/usr/local/lib -lwayland-client -ldbus-1 ;
+			} else {
+				GUILINKFLAGS += -lwayland-client -ldbus-1 ;
+			}
 		}
 
-		if $(HOST64) {
-			if [ GLOB /usr/X11R6/lib : libX11.so libX11.a ] {
-				LibWinD = /usr/X11R6/lib ;
-			} else if [ GLOB /usr/lib/x86_64-linux-gnu : libX11.so libX11.a ] {
-				LibWinD = /usr/lib/x86_64-linux-gnu ;
-			} else if [ GLOB /usr/lib64 : libX11.so libX11.a ] {
-				LibWinD = /usr/lib64 ;
-			} else if [ GLOB /usr/lib : libX11.so libX11.a ] {
-				LibWinD = /usr/lib ;
-			} else if [ GLOB /usr/local/lib : libX11.so libX11.a ] {
-				LibWinD = /usr/local/lib ;
+		# Hmm. Would be nice to use pkg-config here, if system has it.
+		if $(USE_X11) = true {
+			if [ GLOB /usr/X11R6/include/X11 : X.h ] {
+				LibWinH += /usr/X11R6/include ;
+			} else if [ GLOB /usr/include/X11 : X.h ] {
+				LibWinH += /usr/include ;
+			} else if [ GLOB /usr/local/include/X11 : X.h ] {
+				LibWinH += /usr/local/include ;
 			} else {
-				ECHO Unable to locate the 64 bit X11 library files ;
+				EXIT Unable to locate the X11 include files ;
 			}
+
+			if $(HOST64) {
+				if [ GLOB /usr/X11R6/lib : libX11.so libX11.a ] {
+					LibWinD = /usr/X11R6/lib ;
+				} else if [ GLOB /usr/lib/x86_64-linux-gnu : libX11.so libX11.a ] {
+					LibWinD = /usr/lib/x86_64-linux-gnu ;
+				} else if [ GLOB /usr/lib64 : libX11.so libX11.a ] {
+					LibWinD = /usr/lib64 ;
+				} else if [ GLOB /usr/lib : libX11.so libX11.a ] {
+					LibWinD = /usr/lib ;
+				} else if [ GLOB /usr/local/lib : libX11.so libX11.a ] {
+					LibWinD = /usr/local/lib ;
+				} else {
+					ECHO Unable to locate the 64 bit X11 library files ;
+				}
+			} else {
+				if [ GLOB /usr/X11R6/lib : libX11.so libX11.a ] {
+					LibWinD = /usr/X11R6/lib ;
+				} else if [ GLOB /usr/lib/i386-linux-gnu : libX11.so libX11.a ] {
+					LibWinD = /usr/lib/i386-linux-gnu ;
+				} else if [ GLOB /usr/lib : libX11.so libX11.a ] {
+					LibWinD = /usr/lib ;
+				} else if [ GLOB /usr/local/lib : libX11.so libX11.a ] {
+					LibWinD = /usr/local/lib ;
+				} else {
+					ECHO Unable to locate the 32 bit X11 library files ;
+				}
+			}
+			if $(OS) = FREEBSD {
+				GUILINKFLAGS += -L$(LibWinD) -g -lX11 -lXext -lXxf86vm -lXinerama -lXrandr -lXau -lXdmcp -lXss  ;
+			} else if $(OS) = OPENBSD {
+				GUILINKFLAGS += -L$(LibWinD) -g -lX11 -lXext -lXxf86vm -lXinerama -lXrandr -lXau -lXdmcp -lXss -L/usr/local/lib ;
+			} else {
+				GUILINKFLAGS += -L$(LibWinD) -lX11 -lXext -lXxf86vm -lXinerama -lXrandr -lXau -lXdmcp -lXss ;
+			}
+			# HDRS += $(LibWinH) ; 
 		} else {
-			if [ GLOB /usr/X11R6/lib : libX11.so libX11.a ] {
-				LibWinD = /usr/X11R6/lib ;
-			} else if [ GLOB /usr/lib/i386-linux-gnu : libX11.so libX11.a ] {
-				LibWinD = /usr/lib/i386-linux-gnu ;
-			} else if [ GLOB /usr/lib : libX11.so libX11.a ] {
-				LibWinD = /usr/lib ;
-			} else if [ GLOB /usr/local/lib : libX11.so libX11.a ] {
-				LibWinD = /usr/local/lib ;
-			} else {
-				ECHO Unable to locate the 32 bit X11 library files ;
-			}
+			DEFINES += NO_X11_DISP ;
 		}
+
 		if $(OS) = FREEBSD {
 			LINKFLAGS += -g -lrt -lusb ;
-			GUILINKFLAGS += -L$(LibWinD) -g -lX11 -lXext -lXxf86vm -lXinerama -lXrandr -lXau -lXdmcp -lXss  ;
-		} else if $(OS) = OPENBSD {
-			LINKFLAGS += ;
-			GUILINKFLAGS += -L$(LibWinD) -g -lX11 -lXext -lXxf86vm -lXinerama -lXrandr -lXau -lXdmcp -lXss -L/usr/local/lib ;
-		} else {
+		} else if $(OS) != OPENBSD {
 			LINKFLAGS += -ldl -lrt ;
-			GUILINKFLAGS += -L$(LibWinD) -lX11 -lXext -lXxf86vm -lXinerama -lXrandr -lXau -lXdmcp -lXss ;
 		}
-		# HDRS += $(LibWinH) ; 
 	}
 }
 

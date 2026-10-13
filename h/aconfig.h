@@ -75,8 +75,11 @@
 #endif
 
 /* UNIX_X11 also selects the Linux/BSD USB, HID and ucmm code, so it stays */
-/* defined on Wayland builds. UNIX_X11_DISP guards only the Xlib display code. */
-#if defined(UNIX_X11) && !defined(UNIX_WAYLAND)
+/* defined on Wayland builds. UNIX_X11_DISP guards only the Xlib display code, */
+/* and UNIX_WAYLAND the Wayland (KWin) code. With both, the display system */
+/* is chosen when a program runs (see dispwin_wayland()). Jamtop defines */
+/* NO_X11_DISP for a Wayland-only build. */
+#if defined(UNIX_X11) && !defined(NO_X11_DISP)
 # define UNIX_X11_DISP
 #endif
 

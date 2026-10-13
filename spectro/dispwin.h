@@ -145,10 +145,29 @@ typedef struct {
 #endif /* UNIX_X11_DISP */
 } disppath;
 
+/* Return nz if the Wayland (KWin) code is in use rather than X11's. */
+/* Builds with both choose once, when first asked: dispwin_wayland_auto(), */
+/* unless ARGYLL_WINDOW_SYSTEM is "x11" or "wayland". */
+#if defined(UNIX_WAYLAND) && defined(UNIX_X11_DISP)
+int dispwin_wayland(void);
+int dispwin_wayland_auto(void);
+#elif defined(UNIX_WAYLAND)
+# define dispwin_wayland() 1
+# define dispwin_wayland_auto() 1
+#else
+# define dispwin_wayland() 0
+# define dispwin_wayland_auto() 0
+#endif
+
 /* Check that this build's display code can run in the current session. */
-/* Return nz if it can. msg gets a description of the platform, or of */
-/* what's missing. (dispwin -Q reports this for front ends.) */
+/* Return 0 if it can't, 1 if it can, 2 if it can with limitations. msg */
+/* gets a description of the platform, of the limitations, or of what's */
+/* missing. */
 int dispwin_check_platform(char *msg, int len);
+
+/* Print the session and platform report of dispwin -Q for front ends, */
+/* and return its exit status: 0 if supported (perhaps limited), else 1. */
+int dispwin_report_platform(FILE *fp);
 
 /* Return pointer to list of disppath. Last will be NULL. */
 /* Return NULL on failure. */

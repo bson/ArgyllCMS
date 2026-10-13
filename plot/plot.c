@@ -2602,7 +2602,7 @@ void DoPlot(Display *mydisplay, Window mywindow, GC mygc, plot_info *pdp);
 /* n = number of points/vectors. -ve for reversed X axis */
 /* m = number of extra points (x2,y3 or x7,y7) */
 /* x8,y8 to x9,y9 are extra optional vectors with optional colors */
-static int do_plot_imp(
+static int x11_do_plot_imp(
 	int flags,
     double xmin, double xmax, double ymin, double ymax,	/* Bounding box */
 	double ratio,	/* Aspect ratio of window, X/Y */
@@ -3690,26 +3690,38 @@ static void wlp_open_window(wlplot *w, int wi, int he) {
 			error("Lost connection to the Wayland compositor");
 }
 
-static wlplot *wlp_connect(void) {
+/* If quiet, return NULL rather than exit when the compositor can't be used */
+static wlplot *wlp_connect(int quiet) {
 	wlplot *w;
 
 	if ((w = calloc(1, sizeof(wlplot))) == NULL)
 		error("plot: malloc failed");
-	if ((w->dpy = wl_display_connect(NULL)) == NULL)
+	if ((w->dpy = wl_display_connect(NULL)) == NULL) {
+		if (quiet) {
+			free(w);
+			return NULL;
+		}
 		error("Unable to connect to the Wayland compositor");
+	}
 	w->reg = wl_display_get_registry(w->dpy);
 	wl_registry_add_listener(w->reg, &wlp_reg_listener, w);
 	wl_display_roundtrip(w->dpy);
 	wl_display_roundtrip(w->dpy);		/* Seat capabilities */
-	if (w->comp == NULL || w->shm == NULL || w->wm == NULL)
+	if (w->comp == NULL || w->shm == NULL || w->wm == NULL) {
+		if (quiet) {
+			wl_display_disconnect(w->dpy);
+			free(w);
+			return NULL;
+		}
 		error("The Wayland compositor lacks wl_compositor, wl_shm or xdg_wm_base");
+	}
 	return w;
 }
 
 /* Superset implementation function: */
 /* return 0 on success, -1 on error */
 /* (See the X11 version above for the argument details) */
-static int do_plot_imp(
+static int wl_do_plot_imp(
 	int flags,
     double xmin, double xmax, double ymin, double ymax,	/* Bounding box */
 	double ratio,	/* Aspect ratio of window, X/Y */
@@ -3810,7 +3822,7 @@ static int do_plot_imp(
 	ui_UsingGUI();
 
 	if (wlp == NULL)
-		wlp = wlp_connect();
+		wlp = wlp_connect(0);
 
 	if (wlp->surf == NULL)
 		wlp_open_window(wlp, (int)(DEFWWIDTH * ratio + 0.5), DEFWHEIGHT);
@@ -3844,6 +3856,77 @@ static int do_plot_imp(
 }
 
 #endif /* UNIX_WAYLAND */
+
+#if defined(UNIX_WAYLAND) && defined(UNIX_X11_DISP)
+/* Wayland when the compositor draws the window's title bar (KWin does), */
+/* so it can be moved and closed. Otherwise (GNOME's Mutter doesn't) X11 */
+/* through XWayland, where the window manager draws one. */
+/* ARGYLL_WINDOW_SYSTEM=x11 or wayland overrides this. */
+static int plot_wayland(void) {
+	static int chosen = -1;
+	char *ws;
+
+	if (chosen >= 0)
+		return chosen;
+
+	if ((ws = getenv("ARGYLL_WINDOW_SYSTEM")) != NULL
+	 && (strcmp(ws, "x11") == 0 || strcmp(ws, "wayland") == 0)) {
+		chosen = strcmp(ws, "wayland") == 0;
+	} else if (getenv("WAYLAND_DISPLAY") == NULL) {
+		chosen = 0;
+	} else if (getenv("DISPLAY") == NULL) {
+		chosen = 1;
+	} else {
+		/* Kept for the plot if chosen */
+		if ((wlp = wlp_connect(1)) != NULL && wlp->decomgr != NULL) {
+			chosen = 1;
+		} else {
+			if (wlp != NULL) {
+				wl_display_disconnect(wlp->dpy);
+				free(wlp);
+				wlp = NULL;
+			}
+			chosen = 0;
+		}
+	}
+	debugf(("plot: using %s\n", chosen ? "Wayland" : "X11"));
+	return chosen;
+}
+#endif /* UNIX_WAYLAND && UNIX_X11_DISP */
+
+#if defined(UNIX_WAYLAND) || defined(UNIX_X11_DISP)
+static int do_plot_imp(
+	int flags,
+    double xmin, double xmax, double ymin, double ymax,
+	double ratio,
+	int dowait,
+    double *x1, double *x2,
+    double *yy[MXGPHS], plot_col *ncols, char **ntext,
+	int n,
+	double *x7, double *y7, plot_col *mcols, char **mtext,
+    int m,
+	double *x8, double *y8, double *x9, double *y9, plot_col *ocols,
+	int o,
+	double *xp, double *yp, plot_sym *tp, plot_col *pcols, char **ptext,
+	int p
+) {
+#if defined(UNIX_WAYLAND) && defined(UNIX_X11_DISP)
+	if (!plot_wayland())
+		return x11_do_plot_imp(flags, xmin, xmax, ymin, ymax, ratio, dowait,
+		                       x1, x2, yy, ncols, ntext, n, x7, y7, mcols, mtext, m,
+		                       x8, y8, x9, y9, ocols, o, xp, yp, tp, pcols, ptext, p);
+#endif
+#if defined(UNIX_WAYLAND)
+	return wl_do_plot_imp(flags, xmin, xmax, ymin, ymax, ratio, dowait,
+	                      x1, x2, yy, ncols, ntext, n, x7, y7, mcols, mtext, m,
+	                      x8, y8, x9, y9, ocols, o, xp, yp, tp, pcols, ptext, p);
+#else
+	return x11_do_plot_imp(flags, xmin, xmax, ymin, ymax, ratio, dowait,
+	                       x1, x2, yy, ncols, ntext, n, x7, y7, mcols, mtext, m,
+	                       x8, y8, x9, y9, ocols, o, xp, yp, tp, pcols, ptext, p);
+#endif
+}
+#endif /* UNIX_WAYLAND || UNIX_X11_DISP */
 
 /***********************************************************************/
 /* Nice graph labeling functions */

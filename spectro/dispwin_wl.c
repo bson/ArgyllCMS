@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <unistd.h>
+#include <sys/socket.h>
 #include <wayland-client.h>
 #include <dbus/dbus.h>
 #include "copyright.h"
@@ -626,6 +627,75 @@ int wl_check_platform(char *msg, int len) {
 		                   "together", missing);
 	wl_free_conn(w);
 	return ok;
+}
+
+/* Our own copy of struct ucred, which glibc only declares with _GNU_SOURCE */
+typedef struct {
+	pid_t pid;
+	uid_t uid;
+	gid_t gid;
+} wl_peercred;
+
+int wl_compositor_name(char *name, int len) {
+	static const struct { char *comm, *name; } known[] = {
+		{ "kwin_wayland", "KWin" },
+		{ "kwin_wayland_wrapper", "KWin" },
+		{ "gnome-shell", "GNOME Shell" },
+		{ "mutter", "Mutter" },
+		{ "sway", "Sway" },
+		{ "Hyprland", "Hyprland" },
+		{ "weston", "Weston" },
+		{ "cosmic-comp", "COSMIC" },
+	};
+	struct wl_display *dpy;
+	char comm[256] = "";
+
+	/* Without WAYLAND_DISPLAY libwayland tries wayland-0, which in an */
+	/* X11 session may belong to another session's compositor */
+	if (getenv("WAYLAND_DISPLAY") == NULL || (dpy = wl_display_connect(NULL)) == NULL)
+		return 0;
+
+	/* Wayland has no protocol for the compositor to name itself, so ask */
+	/* the kernel which process is at the other end of the socket. That's */
+	/* the one that listens, which for KWin is kwin_wayland_wrapper. Its */
+	/* name comes from the command line, as /proc's comm is cut off at 15 */
+	/* characters. */
+#if defined(SO_PEERCRED)
+	{
+		wl_peercred cred;
+		socklen_t clen = sizeof(cred);
+
+		if (getsockopt(wl_display_get_fd(dpy), SOL_SOCKET, SO_PEERCRED, &cred, &clen) == 0
+		 && cred.pid > 0) {
+			char path[64];
+			FILE *fp;
+
+			snprintf(path, sizeof(path), "/proc/%d/cmdline", (int)cred.pid);
+			if ((fp = fopen(path, "r")) != NULL) {
+				size_t n = fread(comm, 1, sizeof(comm) - 1, fp);
+				char *base;
+
+				comm[n] = '\000';		/* argv[0] ends at its own nul */
+				if ((base = strrchr(comm, '/')) != NULL)
+					memmove(comm, base + 1, strlen(base + 1) + 1);
+				fclose(fp);
+			}
+		}
+	}
+#endif
+	wl_display_disconnect(dpy);
+
+	if (comm[0] == '\000') {
+		snprintf(name, len, "unknown");
+	} else {
+		int i;
+		for (i = 0; i < sizeof(known)/sizeof(known[0]); i++) {
+			if (strcmp(comm, known[i].comm) == 0)
+				break;
+		}
+		snprintf(name, len, "%s", i < sizeof(known)/sizeof(known[0]) ? known[i].name : comm);
+	}
+	return 1;
 }
 
 /* ------------------------------------------------------------------ */
