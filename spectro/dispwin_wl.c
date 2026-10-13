@@ -444,6 +444,7 @@ static const struct wl_registry_listener reg_listener = {
 
 static void wl_free_conn(wlwin *w);
 static void wl_read_lut(dispwin *p, double lut[3][WL_LUT_SIZE], char *path);
+static int wl_needs_passthrough(wlwin *w);
 
 /* Connect, bind globals and collect the initial output device state. */
 static wlwin *wl_new_conn(void) {
@@ -581,6 +582,48 @@ static int wl_decode_edid(wldev *dv, unsigned char **edid, int *edid_len) {
 		len = 256;
 	*edid_len = len;
 	return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Platform check */
+
+int wl_check_platform(char *msg, int len) {
+	wlwin *w;
+	char missing[400] = "";
+	int ok;
+
+#define WL_NEED(cond, what) \
+	if (!(cond)) { \
+		if (missing[0] != '\000') \
+			strncat(missing, ", ", sizeof(missing) - strlen(missing) - 1); \
+		strncat(missing, what, sizeof(missing) - strlen(missing) - 1); \
+	}
+
+	if ((w = wl_new_conn()) == NULL) {
+		snprintf(msg, len, "can't connect to a Wayland compositor (is this a Wayland session?)");
+		return 0;
+	}
+	/* The test patch window */
+	WL_NEED(w->comp != NULL, "wl_compositor");
+	WL_NEED(w->subcomp != NULL, "wl_subcompositor");
+	WL_NEED(w->layer_shell != NULL, "zwlr_layer_shell_v1");
+	WL_NEED(w->viewporter != NULL, "wp_viewporter");
+	WL_NEED(w->spb != NULL, "wp_single_pixel_buffer_manager_v1");
+	/* Without it, the compositor would color manage the test values */
+	WL_NEED(w->cmgr != NULL, "wp_color_manager_v1");
+	/* Displays with EDID, profiles, and VideoLUT emulation: KWin only */
+	WL_NEED(w->ndevs > 0, "kde_output_device_v2");
+	WL_NEED(w->kmgmt != NULL && w->kmgmt_ver >= 8, "kde_output_management_v2 (version 8 or later)");
+#undef WL_NEED
+
+	ok = missing[0] == '\000';
+	if (ok)
+		snprintf(msg, len, "KDE Plasma (KWin) on Wayland");
+	else
+		snprintf(msg, len, "the Wayland compositor lacks %s, which only KDE Plasma's KWin provides "
+		                   "together", missing);
+	wl_free_conn(w);
+	return ok;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1164,6 +1207,21 @@ int wl_dispwin_open(dispwin *p, disppath *disp, double width, double height,
 	if (wl_create_window(p, disp, width, height, hoff, voff))
 		return 1;
 
+	/* Measure through a profile that leaves test values alone, with the */
+	/* calibration currently in effect (see wl_needs_passthrough()) */
+	if (p->nent == WL_LUT_SIZE && wl_needs_passthrough(w)) {
+		ramdac cur;
+		int j;
+
+		memset(&cur, 0, sizeof(cur));
+		cur.nent = WL_LUT_SIZE;
+		for (j = 0; j < 3; j++)
+			cur.v[j] = w->base_lut[j];
+		if (wl_dispwin_set_lut(p, &cur, 0) != 0)
+			warning("Couldn't give %s a pass-through profile, so its own profile "
+			        "may alter the test values", w->dev->name);
+	}
+
 	return 0;
 }
 
@@ -1230,6 +1288,17 @@ int wl_dispwin_set_color(dispwin *p) {
 /* nz if path is one of our generated LUT profiles */
 static int wl_is_gen_path(char *path) {
 	return path != NULL && strstr(path, "/" WL_LUT_DIR "/") != NULL;
+}
+
+/* nz while test patches are on screen and the profile KWin would use */
+/* isn't one of ours. KWin encodes output with the profile's own tone */
+/* curves, but describes the output to our tagged surfaces with a single */
+/* transfer function. A profile with per-channel measured curves, as */
+/* dispcal and colprof make, then alters test values channel by channel */
+/* (seen as grays several dE off while white was right). Ours have */
+/* identical pure power curves, so values pass through. */
+static int wl_needs_passthrough(wlwin *w) {
+	return w->base != NULL && w->saved_cps == KDE_CPS_ICC && !wl_is_gen_path(w->saved_icc);
 }
 
 /* The saved profile path to give KWin when restoring, or NULL to leave */
@@ -1547,8 +1616,11 @@ int wl_dispwin_set_lut(dispwin *p, ramdac *r, int persist) {
 	}
 
 	/* Going back to the LUT the saved state gives (e.g. restoring the */
-	/* original LUT on exit) just means restoring the saved state */
-	if (isbase && !persist) {
+	/* original LUT on exit) just means restoring the saved state, except */
+	/* while measuring: that state's profile may not pass test values */
+	/* through, so keep a generated one with the same LUT until the */
+	/* window closes and wl_dispwin_restore() puts the saved state back. */
+	if (isbase && !persist && !wl_needs_passthrough(w)) {
 		if (w->lut_active) {
 			if (wl_apply_config(p, w->saved_cps, -1, wl_restore_path(w)) != 0)
 				return 1;
@@ -1580,7 +1652,9 @@ int wl_dispwin_set_lut(dispwin *p, ramdac *r, int persist) {
 		free(path);
 		return 1;
 	}
-	if (wl_apply_config(p, KDE_CPS_ICC, -1, path) != 0) {
+	/* Already in use, e.g. restoring the original LUT while measuring */
+	if (!(w->lut_active && w->gen_path != NULL && strcmp(w->gen_path, path) == 0)
+	 && wl_apply_config(p, KDE_CPS_ICC, -1, path) != 0) {
 		free(path);
 		return 1;
 	}

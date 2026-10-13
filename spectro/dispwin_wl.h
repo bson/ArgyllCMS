@@ -13,6 +13,11 @@
 	extern "C" {
 #endif
 
+/* Check that this Wayland session provides everything the test patch */
+/* window and calibration loading need. Return nz if it does. msg gets a */
+/* description of the platform, or of what's missing. */
+int wl_check_platform(char *msg, int len);
+
 /* Return a NULL terminated list of the enabled outputs, primary first. */
 /* Return NULL on failure. */
 disppath **wl_get_displays(void);

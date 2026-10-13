@@ -145,6 +145,11 @@ typedef struct {
 #endif /* UNIX_X11_DISP */
 } disppath;
 
+/* Check that this build's display code can run in the current session. */
+/* Return nz if it can. msg gets a description of the platform, or of */
+/* what's missing. (dispwin -Q reports this for front ends.) */
+int dispwin_check_platform(char *msg, int len);
+
 /* Return pointer to list of disppath. Last will be NULL. */
 /* Return NULL on failure. */
 /* Call free_disppaths() to free up allocation */

@@ -1252,6 +1252,36 @@ disppath **get_displays() {
 	return disps;
 }
 
+/* Check that this build's display code can run in the current session, */
+/* for front ends deciding whether to offer display measurement at all. */
+/* Return nz if it can. msg gets a description of the platform, or of */
+/* what's missing. */
+int dispwin_check_platform(char *msg, int len) {
+#if defined(UNIX_WAYLAND)
+	return wl_check_platform(msg, len);
+#elif defined(UNIX_X11_DISP)
+	Display *mydisplay;
+	char *name = getenv("DISPLAY");
+
+	if ((mydisplay = XOpenDisplay(NULL)) == NULL) {
+		snprintf(msg, len, "can't open the X11 display %s", name != NULL ? name : "(DISPLAY isn't set)");
+		return 0;
+	}
+	snprintf(msg, len, "X11 display %s", DisplayString(mydisplay));
+	XCloseDisplay(mydisplay);
+	return 1;
+#elif defined(NT)
+	snprintf(msg, len, "Microsoft Windows");
+	return 1;
+#elif defined(UNIX_APPLE)
+	snprintf(msg, len, "macOS");
+	return 1;
+#else
+	snprintf(msg, len, "this build has no display support");
+	return 0;
+#endif
+}
+
 /* Free a whole list of display paths */
 void free_disppaths(disppath **disps) {
 	if (disps != NULL) {
@@ -6676,6 +6706,7 @@ static void usage(int flag, char *diag, ...) {
 	fprintf(stderr," -x                   Load all profiles for given X11 server\n");
 	fprintf(stderr," -X                   Run in daemon loader mode for given X11 server\n");
 #endif /* X11 */
+	fprintf(stderr," -Q                   Report whether this build supports the displays here, and exit\n");
 	fprintf(stderr," -D [level]           Print debug diagnostics to stderr\n");
 	fprintf(stderr," calfile              Load calibration (.cal or %s) into Video LUT\n",ICC_FILE_EXT);
 	exit(1);
@@ -6728,6 +6759,7 @@ main(int argc, char *argv[]) {
 	p_scope scope = p_scope_user;	/* Scope of profile instalation/un-instalation */
 	int daemonmode = 0;			/* 1 = X11 daemon loader mode */
 								/* 2 = X11 loader mode just once */
+	int checkplatform = 0;		/* -Q */
 	static char calname[MAXNAMEL+1] = "\000";	/* Calibration file name */
 	dispwin *dw;
 	unsigned int seed = 0x56781234;
@@ -6960,6 +6992,9 @@ main(int argc, char *argv[]) {
 				daemonmode = 1;
 #endif
 
+			else if (argv[fa][1] == 'Q')
+				checkplatform = 1;
+
 			else if (argv[fa][1] == 'S') {
 				fa = nfa;
 				if (na == NULL) usage(0,"-S parameter is missing");
@@ -6977,6 +7012,14 @@ main(int argc, char *argv[]) {
 			break;
 	}
 
+	/* For front ends. Before any display is opened, as that fails on */
+	/* a platform this build doesn't support. */
+	if (checkplatform) {
+		char msg[500];
+		int ok = dispwin_check_platform(msg, sizeof(msg));
+		printf("platform %s: %s\n", ok ? "supported" : "unsupported", msg);
+		return ok ? 0 : 1;
+	}
 
 	/* No explicit display has been set */
 	if (disp == NULL

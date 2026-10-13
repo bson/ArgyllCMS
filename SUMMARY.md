@@ -97,11 +97,37 @@ the LUT as a 256 entry vcgt, and points KWin at it in ICC mode.
 - A persistent LUT (`dispwin cal`, `dispwin -c`) becomes the new saved state
   and `base_lut`, so the exit restore leaves it in place. The previous
   generated persistent profile is deleted.
+- Pass-through while measuring: KWin encodes output with the active
+  profile's own tone curves, but describes the output to our tagged surfaces
+  with a single transfer function. A profile with per-channel measured
+  curves (dispcal/colprof profiles) therefore alters test values per channel;
+  grays measured up to about 0.025 off in x while white was right. Generated
+  profiles have identical pure power curves and pass values through. So
+  `wl_dispwin_open()` switches to a generated profile carrying the current
+  LUT whenever a window is up and the saved profile is an ICC profile that
+  isn't ours (`wl_needs_passthrough()`), and `wl_dispwin_set_lut()` doesn't
+  treat "back to the original LUT" as "restore the saved profile" while that
+  holds. The saved profile comes back in `wl_dispwin_restore()`.
 - `wl_dispwin_get_lut()` reads the vcgt of the profile KWin is using, or
   linear without one. Argyll can't read ICC v4 profiles, so their vcgt is
   taken as linear.
 - Each LUT load takes about 50 ms, so the per-patch LUT updates of native
   high-precision mode add little to Argyll's own settling delays.
+
+## Platform check for front ends
+
+`dispwin -Q` prints one line, `platform supported: <what>` or
+`platform unsupported: <why>`, and exits 0 or 1. It runs right after option
+parsing, before any display is opened, since opening one fails on a platform
+the build doesn't support. It reports `dispwin_check_platform()`
+(`dispwin.c`): on Wayland builds `wl_check_platform()`, which connects to the
+compositor and requires `wl_compositor`, `wl_subcompositor`,
+`zwlr_layer_shell_v1`, `wp_viewporter`, `wp_single_pixel_buffer_manager_v1`,
+`wp_color_manager_v1`, `kde_output_device_v2` devices and
+`kde_output_management_v2` v8+, naming whatever is missing. X11 builds check
+that the X display opens; Windows and macOS builds report supported.
+Without `WAYLAND_DISPLAY`, libwayland tries the default `wayland-0` socket, so
+in a Plasma session it still connects; an X11 session has no such socket.
 
 ## spectro/dispwin.c, dispwin.h
 
