@@ -30,7 +30,10 @@
 #endif
 #include <fcntl.h>
 
-#if TARGET_OS_MAC
+/* TARGET_OS_MAC comes from <TargetConditionals.h>, which isn't included */
+/* here, so on its own this never matched, and current clang rejects the */
+/* undeclared read(), write(), lseek() and close() */
+#if TARGET_OS_MAC || defined(__APPLE__)
 # include <unistd.h>
 #endif
 
