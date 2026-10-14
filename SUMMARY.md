@@ -219,6 +219,18 @@ is opened, since opening one fails on a platform the build doesn't support.
   which pass its monotonicity and contrast checks (every comparison with NaN
   is false) and the per-platform [0,1] clamp in `dispwin_set_ramdac()`, and
   then convert to undefined, often black, table entries.
+- macOS 27 workaround: when a process that set the VideoLUT transiently
+  (`CGSetDisplayTransferByTable()`) exits, macOS loads an all-zero table
+  instead of the display profile's calibration, leaving the display black
+  until WindowServer restarts. `dispwin->lutset` records how this process
+  last set the LUT (0 not, 1 transiently, 2 persistently, from
+  `dispwin_set_ramdac()`). `restore_display()`, whose restore is itself a
+  transient set, skips the restore if the LUT was never set (dispwin `-W`,
+  `-s`, ...), and after a transient set has ColorSync apply the current
+  profile again (`osx_reapply_profile()`, `ColorSyncDeviceSetCustomProfiles()`
+  with the same profile), which loads its vcgt in a way that outlives the
+  process. Persistent sets (`-c`, `-L`, via the temporary-profile trick)
+  already survive and are left as they were.
 - Profile install/uninstall/get keep the ucmm/colord logic. On Wayland the
   X11 atom work is replaced by pointing KWin at the installed copy
   (`ucmm_get_monitor_profile()` after install), resetting to sRGB on

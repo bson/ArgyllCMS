@@ -308,6 +308,8 @@ struct _dispwin {
 	void *osx_cntx;			/* OSX specific info */	
 	int btf;				/* Flag, nz if window has been brought to the front once */
 	int winclose;			/* Flag, set to nz if window was closed */
+	int lutset;				/* How the VideoLUT was last set: 0 = not, 1 = transiently, */
+							/* 2 = persistently. See restore_display() */
 #endif /* UNIX_APPLE */
 
 #if defined(UNIX_X11)

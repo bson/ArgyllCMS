@@ -2232,7 +2232,8 @@ static int dispwin_set_ramdac(dispwin *p, ramdac *r, int persist) {
 			debugr("CGSetDisplayTransferByTable failed\n");
 			return 1;
 		}
-
+		/* Stays transient if the persistent set below fails */
+		p->lutset = 1;
 	}
 
 	/* In theory IOFBSetGamma() might work - but maybe it needs root, and won't */
@@ -2646,6 +2647,8 @@ static int dispwin_set_ramdac(dispwin *p, ramdac *r, int persist) {
 	}
 #endif	/* < 10.6 */
 
+	if (persist)
+		p->lutset = 2;
 #endif /* UNIX_APPLE */
 
 #if defined(UNIX_X11_DISP)
@@ -4007,13 +4010,63 @@ icmFile *dispwin_get_profile(dispwin *p, char *name, int mxlen) {
 
 /* ===================================================================== */
 
+#if defined(UNIX_APPLE) && MAC_OS_X_VERSION_MIN_REQUIRED >= 1060
+/* Make ColorSync apply the display's current profile again, which loads */
+/* its vcgt into the VideoLUT. Return nz on error. */
+static int osx_reapply_profile(dispwin *p) {
+	CFStringRef id;
+	CFURLRef url;
+	CFUUIDRef dispuuid;
+	CFDictionaryRef dict;
+	const void *keys[1], *values[1];
+	int rv = 1;
+
+	if ((url = cur_profile_url(&id, p)) == NULL)
+		return 1;
+	if ((dispuuid = CGDisplayCreateUUIDFromDisplayID(p->ddid)) != NULL) {
+		keys[0] = id;
+		values[0] = url;
+		if ((dict = CFDictionaryCreate(kCFAllocatorDefault, keys, values, 1, NULL, NULL)) != NULL) {
+			if (ColorSyncDeviceSetCustomProfiles(kColorSyncDisplayDeviceClass, dispuuid, dict))
+				rv = 0;
+			CFRelease(dict);
+		}
+		CFRelease(dispuuid);
+	}
+	CFRelease(id);
+	CFRelease(url);
+	return rv;
+}
+#endif
+
 /* Restore the display state and free ramdacs */
 static void restore_display(dispwin *p) {
+#ifdef UNIX_APPLE
+	int lutset = p->lutset;		/* Before our own restore below changes it */
+#endif
 
 	if (p->oor != NULL) {
 		p->oor->del(p->oor);
 		p->oor = NULL;
 	}
+
+#ifdef UNIX_APPLE
+	/* macOS 27 workaround, hopefully temporary: when a process that set the */
+	/* VideoLUT transiently exits, macOS is meant to load the display */
+	/* profile's calibration again, but instead loads an all-zero table, */
+	/* which leaves the display black (at full brightness) until */
+	/* WindowServer restarts. The restore below is itself a transient set, */
+	/* so leave the LUT alone if this process never changed it (e.g. dispwin */
+	/* -W or -s), and after a transient change, have ColorSync apply the */
+	/* profile again, which loads its calibration in a way that outlives */
+	/* the process. A persistent set (dispwin -c, -L) isn't affected. */
+	if (lutset == 0 && p->or != NULL) {
+		p->or->del(p->or);
+		p->or = NULL;
+		debugr("VideoLUT unchanged, not restoring it\n");
+	}
+#endif
+
 	/* Restore the ramdac */
 	if (p->or != NULL) {
 		p->set_ramdac(p, p->or, 0);
@@ -4022,6 +4075,14 @@ static void restore_display(dispwin *p) {
 		p->or = NULL;
 		debugr("Restored original ramdac\n");
 	}
+#if defined(UNIX_APPLE) && MAC_OS_X_VERSION_MIN_REQUIRED >= 1060
+	if (lutset == 1) {
+		if (osx_reapply_profile(p) != 0)
+			debugr("Applying the display profile again failed\n");
+		else
+			debugr("Applied the display profile again\n");
+	}
+#endif
 	if (p->r != NULL) {
 		p->r->del(p->r);
 		p->r = NULL;
