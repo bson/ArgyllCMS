@@ -210,6 +210,7 @@ char *fl_end = "";			/* For strings with no \n and a do_fflush() */
 
 void check_if_not_interactive() {
 	char *ev;
+	int piped_stdin = 0;
 
 	/* A front end reading our output through a pipe needs progress and */
 	/* prompts as they're printed, and neither ends with a newline, so stdout */
@@ -234,7 +235,20 @@ void check_if_not_interactive() {
 
 	fl_end = "";
 
-	if ((ev = getenv("ARGYLL_NOT_INTERACTIVE")) != NULL) {
+#ifdef NT
+	/* A front end driving us through a pipe sends its keys on stdin, but */
+	/* interactively keys come from the console (_getch()), which isn't the */
+	/* front end's. So a piped stdin means not interactive, as */
+	/* ARGYLL_NOT_INTERACTIVE does. (Elsewhere keys are read from stdin */
+	/* either way.) */
+	{
+		HANDLE inh = GetStdHandle(STD_INPUT_HANDLE);
+		if (inh != INVALID_HANDLE_VALUE && GetFileType(inh) == FILE_TYPE_PIPE)
+			piped_stdin = 1;
+	}
+#endif
+
+	if ((ev = getenv("ARGYLL_NOT_INTERACTIVE")) != NULL || piped_stdin) {
 #ifdef NT
 		HANDLE stdinh;
 #endif

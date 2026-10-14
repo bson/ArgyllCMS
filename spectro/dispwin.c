@@ -5358,9 +5358,22 @@ int ddebug						/* >0 to print debug statements to stderr */
 		disp_vrz = GetDeviceCaps(p->hdc, VERTRES);
 
 		wi = (int)(width * (double)disp_hrz/(double)disp_hsz + 0.5);
+		he = (int)(height * (double)disp_vrz/(double)disp_vsz + 0.5);
+
+		/* HORZSIZE and VERTSIZE are derived from the logical DPI (96) rather */
+		/* than the display's real size, so on a dense panel (or in a VM shown */
+		/* on one) the "100 mm" patch comes out a fraction of that. Make it at */
+		/* least a third of the display's height (scaled with the patch size */
+		/* asked for), more than any instrument's aperture needs. */
+		{
+			int mn = (int)(disp_vrz / 3.0 * height / 100.0 + 0.5);
+			if (he < mn) {
+				wi = he > 0 ? (int)(wi * (double)mn / he + 0.5) : mn;
+				he = mn;
+			}
+		}
 		if (wi > disp_hrz)
 			wi = disp_hrz;
-		he = (int)(height * (double)disp_vrz/(double)disp_vsz + 0.5);
 		if (he > disp_vrz)
 			he = disp_vrz;
 

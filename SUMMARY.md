@@ -262,6 +262,25 @@ all absorbed by the hub's retries. The software now rides out such errors:
   `terminate`, so `i1d3_del()`'s fallback called a NULL pointer.
 - `spectro/usbio_lx.c`: failed URBs log their errno at debug level 1.
 
+## Windows
+
+- `check_if_not_interactive()` (`numlib/numsup.c`): a piped stdin means
+  not interactive, as `ARGYLL_NOT_INTERACTIVE` does. Interactively, keys
+  come from the console (`_getch()`), which a front end driving the
+  program through pipes doesn't own; non-interactively they're read from
+  stdin, a line at a time (the line end is discarded), and progress lines
+  end with `\n`.
+- `new_dispwin()` (`spectro/dispwin.c`): the test patch is at least a third
+  of the display's height (scaled with the patch size asked for).
+  `GetDeviceCaps(HORZSIZE)` is derived from the logical DPI (96), not the
+  display's real size, so on a dense panel, or in a VM shown on one, the
+  "100 mm" patch came out a fraction of that.
+- Built with MinGW-w64 (WinLibs GCC 16.2) and ArgyllCMS's jam
+  (`ajam-2.5.2-1.3.4.zip`) built with `gcc -DNT -fpermissive` (`-DMINGW64`
+  gives `OS=MINGW64`, which the Jambase doesn't treat as Windows), with
+  `MINGW` naming the compiler's folder. `DESTDIR` must be relative: jam
+  can't create a path starting with a drive letter.
+
 ## Installed profile for front ends (dispwin -W)
 
 `dispwin -d n -W` prints `profile: <path>` for the profile the system
