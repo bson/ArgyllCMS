@@ -215,6 +215,10 @@ is opened, since opening one fails on a platform the build doesn't support.
 - `dispwin_get_ramdac()` / `dispwin_set_ramdac()` go through the VideoLUT
   emulation above. Without it (`nent == 0`), get returns NULL and callers
   treat the display as having no VideoLUT.
+- `dispwin_sane_ramdac()` also rejects curves with NaN or infinite values,
+  which pass its monotonicity and contrast checks (every comparison with NaN
+  is false) and the per-platform [0,1] clamp in `dispwin_set_ramdac()`, and
+  then convert to undefined, often black, table entries.
 - Profile install/uninstall/get keep the ucmm/colord logic. On Wayland the
   X11 atom work is replaced by pointing KWin at the installed copy
   (`ucmm_get_monitor_profile()` after install), resetting to sRGB on

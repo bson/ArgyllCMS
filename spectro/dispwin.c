@@ -2783,6 +2783,18 @@ int dispwin_sane_ramdac(ramdac *r) {
 	int sane = 1;
 
 	debug("dispwin_sane_ramdac called\n");
+
+	/* NaN fails every comparison, so it would pass the checks below, and */
+	/* then slip through the [0,1] clamp in set_ramdac and convert to an */
+	/* undefined (in practice often black) table entry. Infinity is */
+	/* rejected too, as it only comes from a computation gone wrong. */
+	for (i = 0; i < r->nent; i++) {
+		for (j = 0; j < 3; j++) {
+			if (!(r->v[j][i] > -1e6 && r->v[j][i] < 1e6))
+				return 0;
+		}
+	}
+
 	for (i = 1; i < r->nent; i++) {
 		for (j = 0; j < 3; j++) {
 			if (r->v[j][i] - r->v[j][i-1] < -0.05)		/* Goes 5% backwards */
