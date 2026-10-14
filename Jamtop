@@ -84,6 +84,16 @@ USE_USBDK = false ;	# [false]
 # For testing CCast
 #DEFINES += CCTEST_PATTERN ;
 
+# ArgyllCMS reads some structures through pointers of other types (the
+# gamut BSP tree's node tags, among others), which C's strict aliasing rules
+# let an optimizer assume never happens. Apple clang 21 (macOS 27) does, and
+# the gamut code then fails (GenRMGam: "radial internal error - failed to
+# find triangle"); GCC and older clang happen not to. Unix compilers are all
+# GCC or clang, which take this.
+if $(UNIX) {
+	CCFLAGS += -fno-strict-aliasing ;
+}
+
 # Information for compiling and linking GUI programs
 
 if $(UNIX) {

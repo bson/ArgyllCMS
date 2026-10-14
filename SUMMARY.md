@@ -24,6 +24,14 @@ display code, and each program picks one when it runs.
   the Linux USB/HID code, `USE_UCMM` and the ICC header platform depend on it.
   All Xlib display code is under `UNIX_X11_DISP`.
 
+- `Jamtop`: Unix builds compile with `-fno-strict-aliasing`. ArgyllCMS
+  reads structures through pointers of other types (e.g. the gamut BSP
+  tree's node tags in `gamut/gamut.c`), which strict aliasing lets the
+  optimizer assume never happens. Apple clang 21 (macOS 27) does, and the
+  install-time `GenRMGam` failed ("radial internal error - failed to find
+  triangle"); with the flag its `RefMediumGamut.gam` is byte-identical to
+  an `-O0` build's.
+
 ## Choosing Wayland or X11 at run time
 
 - `dispwin_wayland()` (`dispwin.c`, declared in `dispwin.h`; a constant macro
