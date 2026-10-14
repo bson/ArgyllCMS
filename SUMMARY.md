@@ -254,6 +254,15 @@ all absorbed by the hub's retries. The software now rides out such errors:
   `terminate`, so `i1d3_del()`'s fallback called a NULL pointer.
 - `spectro/usbio_lx.c`: failed URBs log their errno at debug level 1.
 
+## Installed profile for front ends (dispwin -W)
+
+`dispwin -d n -W` prints `profile: <path>` for the profile the system
+associates with display n, as `-L` would load it (`dispwin_get_profile()`:
+ColorSync on macOS, colord or ucmm and then the compositor on Linux), or
+`profile: none`, and exits. It opens the display without a window, as
+`-L` does, and changes nothing. On X11 without a configured profile the
+value can be the root window atom's name rather than a path.
+
 ## Output for front ends (numlib/numsup.c)
 
 `check_if_not_interactive()`, which the interactive programs (dispcal,

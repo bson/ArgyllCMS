@@ -3733,20 +3733,23 @@ icmFile *dispwin_get_profile(dispwin *p, char *name, int mxlen) {
 			return NULL;
 		}
 		fclose(fp);
-		free(dpath); dpath = NULL;
 
 		/* Memory File fp that will free the buffer when deleted: */
 		if ((rd_fp = new_icmFileMem_ad(&err, buf, sbuf.st_size, al)) == NULL) {
 			debugr("Creating memory file profile failed");
 			al->free(al, buf);
 			al->del(al);
+			free(dpath);
 			return NULL;
 		}
 
+		/* The file's path, as the other platforms give (this said */
+		/* "Display"), so front ends can tell which profile it is */
 		if (name != NULL) {
-			strncpy(name, "Display", mxlen);
+			strncpy(name, dpath, mxlen);
 			name[mxlen] = '\000';
 		}
+		free(dpath);
 
 		return rd_fp;
 	}
@@ -6897,6 +6900,7 @@ static void usage(int flag, char *diag, ...) {
 	fprintf(stderr," -S d                 Specify the install/uninstall scope for OS X [nlu] or X11/Vista [lu]\n");
 	fprintf(stderr,"                      d is one of: n = network, l = local system, u = user (default)\n");
 	fprintf(stderr," -L                   Load installed profile & calibration\n");
+	fprintf(stderr," -W                   Print the path of the display's installed profile, and exit\n");
 #if defined(UNIX_X11_DISP)
 	fprintf(stderr," -x                   Load all profiles for given X11 server\n");
 	fprintf(stderr," -X                   Run in daemon loader mode for given X11 server\n");
@@ -6950,6 +6954,7 @@ main(int argc, char *argv[]) {
 	int verify = 0;				/* Verify that calname is currently loaded */
 	int installprofile = 0;		/* Install (1) or uninstall (2) a profile for display */
 	int loadprofile = 0;		/* Load displays profile calibration into LUT */
+	int showprofile = 0;		/* -W: print the installed profile's path */
 	int loadfile = 0;			/* Load given profile into LUT */
 	p_scope scope = p_scope_user;	/* Scope of profile instalation/un-instalation */
 	int daemonmode = 0;			/* 1 = X11 daemon loader mode */
@@ -7179,6 +7184,9 @@ main(int argc, char *argv[]) {
 			else if (argv[fa][1] == 'L')
 				loadprofile = 1;
 
+			else if (argv[fa][1] == 'W')
+				showprofile = 1;
+
 #if defined(UNIX_X11_DISP)
 			else if (argv[fa][1] == 'x')
 				daemonmode = 2;
@@ -7276,7 +7284,8 @@ main(int argc, char *argv[]) {
 		error("Can't verify and uninstall a displays profile at the same time");
 
 	/* Don't create a window if it won't be used */
-	if (ramd != 0 || sname[0] != '\000' || clear != 0 || verify != 0 || loadfile != 0 || installprofile != 0 || loadprofile != 0)
+	if (ramd != 0 || sname[0] != '\000' || clear != 0 || verify != 0 || loadfile != 0 || installprofile != 0 || loadprofile != 0
+	 || showprofile != 0)
 		nowin = 1;
 
 	if (webdisp != 0) {
@@ -7343,6 +7352,24 @@ main(int argc, char *argv[]) {
 	if ((native & 1) != 0 && noramdac) {
 		warning("Unable to access to VideoLUTs so can't be sure colors are native");
 	} 
+
+	/* For front ends: the profile the system associates with this display, */
+	/* as -L would load it (ColorSync on macOS, colord, ucmm or the */
+	/* compositor on Linux). "none" if there isn't one. On X11 without a */
+	/* configured profile it can be the root window's atom name rather than */
+	/* a path. */
+	if (showprofile) {
+		icmFile *rd_fp;
+
+		if ((rd_fp = dw->get_profile(dw, calname, MAXNAMEL)) == NULL) {
+			printf("profile: none\n");
+		} else {
+			printf("profile: %s\n", calname);
+			rd_fp->del(rd_fp);
+		}
+		dw->del(dw);
+		return 0;
+	}
 
 
 	/* Save the current Video LUT to the calfile */
