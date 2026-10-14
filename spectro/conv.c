@@ -207,6 +207,16 @@ static int con_char(int wait) {
 
 			for (bib = 0; bib < 10;) {
 //fprintf(stderr,"~1  got %d in buf\n",bib);
+				/* Setting NOWAIT can fail (it needs write-attributes access */
+				/* to the handle, which a front end's pipe may not give), and */
+				/* then ReadFile() would block a poll until a key came, */
+				/* stopping a measurement at its first abort check. So a poll */
+				/* only reads what's already there. */
+				if (!wait) {
+					DWORD avail = 0;
+					if (!PeekNamedPipe(stdinh, NULL, 0, NULL, &avail, NULL) || avail == 0)
+						break;
+				}
 				if ((!ReadFile(stdinh, buf + bib, 10 - bib, &bread, NULL) || bread == 0)
 				 && !wait) {
 //fprintf(stderr,"~1  no chars waiting\n");

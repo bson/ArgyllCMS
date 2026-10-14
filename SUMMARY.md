@@ -270,6 +270,13 @@ all absorbed by the hub's retries. The software now rides out such errors:
   program through pipes doesn't own; non-interactively they're read from
   stdin, a line at a time (the line end is discarded), and progress lines
   end with `\n`.
+- `con_char()` (`spectro/conv.c`): a poll for a key (`poll_con_char()`,
+  which measuring loops call to allow aborting) only reads what
+  `PeekNamedPipe()` says is there. Setting the pipe to NOWAIT needs
+  write-attributes access to the handle, which a front end's pipe (Rust's,
+  for one) may not give; then `ReadFile()` blocked the poll until a key
+  came, and dispcal stopped at its first reading after measuring the
+  display's update delay.
 - `new_dispwin()` (`spectro/dispwin.c`): the test patch is at least a third
   of the display's height (scaled with the patch size asked for).
   `GetDeviceCaps(HORZSIZE)` is derived from the logical DPI (96), not the
