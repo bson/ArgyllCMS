@@ -71,7 +71,7 @@ if $(UNIX) {
 #Products
 Libraries = libinsttypes libdisptechs libinst libdisp libconv libinstapp ;
 Executables = dispwin synthcal dispread dispcal fakeread synthread
-              chartread spotread illumread ccxxmake average oeminst ;
+              chartread spotread instled illumread ccxxmake average oeminst ;
 Headers = inst.h ;
 Samples = SOtele.sp linear.cal strange.cal ccxx.ti1 ;
 
@@ -217,6 +217,9 @@ Main illumread : illumread.c : : : ../target : : ;
 
 # Printed target spot reader utility
 Main spotread : spotread.c : : : : : ;
+
+# Instrument indicator LED on or off
+Main instled : instled.c : : : : : ;
 
 echo "HOME = " $(HOME) ;
 echo "PWD = " $(PWD) ;

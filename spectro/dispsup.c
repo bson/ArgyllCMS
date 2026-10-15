@@ -264,6 +264,7 @@ static inst *open_inst_retry(icompath *ipath, baud_rate br, flow_control fc,
 }
 
 static int config_inst_displ(disprd *p);
+static void disprd_led(disprd *p, int measuring);
 
 /* Automatic reconnects allowed for one reading before asking the user */
 #define DISPRD_MAX_REOPEN 3
@@ -339,6 +340,7 @@ static int disprd_reopen_inst(disprd *p, int attempt) {
 	p->it->capabilities(p->it, NULL, &cap2, NULL);
 	if (cap2 & inst2_has_target)
 		p->it->get_set_opt(p->it, inst_opt_set_target_state, 1);
+	disprd_led(p, 1);		/* Reopened while reading patches */
 	return 0;
 }
 
@@ -1327,6 +1329,22 @@ static void disprd_change_drift_comp(disprd *p,
 /* Take a series of readings from the display */
 /* Return nz on fail/abort - see dispsup.h */
 /* Use disprd_err() to interpret it */
+/* Show the instrument is measuring: its LED pulses while patches are read, */
+/* and is on steadily otherwise. Only instruments whose LED can pulse are */
+/* touched, so one whose LED means something else is left alone. */
+static void disprd_led(disprd *p, int measuring) {
+	int mask = 0;
+
+	if (p->it == NULL
+	 || p->it->get_set_opt(p->it, inst_opt_get_pulse_ledmask, &mask) != inst_ok
+	 || mask == 0)
+		return;
+	if (measuring)		/* A 2 second breath: fade on, off for 0.8 s */
+		p->it->get_set_opt(p->it, inst_opt_set_led_pulse_state, 2.0, 0.3, 0.3);
+	else
+		p->it->get_set_opt(p->it, inst_opt_set_led_state, mask);
+}
+
 static int disprd_read(
 	disprd *p,
 	col *cols,		/* Array of patch colors to be tested */
@@ -1340,13 +1358,14 @@ static int disprd_read(
 ) {
 	int rv, i;
 
-	if (p->bdrift || p->wdrift) {
-		if ((rv = disprd_read_drift(p, cols,npat,spat,tpat,acr,tc,clamp, 0)) != 0)
-			return rv;
-	} else {
-		if ((rv = disprd_read_imp(p, cols,npat,spat,tpat,acr,tc,clamp, 0)) != 0)
-			return rv;
-	}
+	disprd_led(p, 1);
+	if (p->bdrift || p->wdrift)
+		rv = disprd_read_drift(p, cols,npat,spat,tpat,acr,tc,clamp, 0);
+	else
+		rv = disprd_read_imp(p, cols,npat,spat,tpat,acr,tc,clamp, 0);
+	disprd_led(p, 0);
+	if (rv != 0)
+		return rv;
 
 	/* Use spectral if available. */
 	/* Since this is a display, assume that this is absolute spectral */

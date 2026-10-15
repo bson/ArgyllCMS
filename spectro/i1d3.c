@@ -3076,8 +3076,10 @@ i1d3_init_inst(inst *pp) {
 # pragma message("######### i1pro3.c Diffuser thread disabled !!!!! ########")
 #endif
 
-	/* Flash the LED, just cos we can! */
-	if ((ev = i1d3_set_LEDs(p, i1d3_flash, 0.2, 0.05, 2)) != inst_ok)
+	/* Light the LED and leave it on, to show the instrument is in use. */
+	/* (It used to flash twice and go out.) */
+	p->led_state = 1;
+	if ((ev = i1d3_set_LEDs(p, i1d3_flash, 0.0, 100.0, 0x80)) != inst_ok)
 		return ev;
 
 	a1logd(p->log, 2, "i1d3_init_inst: done\n");

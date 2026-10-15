@@ -348,6 +348,35 @@ the comma) and ignored.
 - `plot_font.h` is the "Rowman Single" (Hershey Roman Simplex) table copied
   from `render/render.c`, because `libplot` users don't link `librender`.
 
+## Instrument indicator LED (spectro/i1d3.c, instled.c)
+
+- `i1d3_init_inst()` turns the i1Display Pro's white LED on and leaves it
+  on (`i1d3_set_LEDs()` flash mode, off 0, on the longest, 0x80 pulses,
+  as `inst_opt_set_led_state` does), where upstream flashed it twice and
+  left it off. Every program that opens the instrument (dispcal, dispread,
+  spotread, ...) so shows it in use, and the light stays on after the
+  program exits.
+- `instled [-c listno] [-v] on|off` sets an instrument's general LED
+  through `inst_opt_get_gen_ledmask` and `inst_opt_set_led_state`, without
+  measuring; instruments with no controllable LED are left alone. For front
+  ends that want the light on as soon as they've found the instrument.
+  It lists only USB and HID instruments (`new_icompaths_sel()` with
+  `icomt_instrument | icomt_usb | icomt_hid`): probing the serial ports took
+  2.4 of its 5.3 s, and no instrument with an LED is serial. USB and HID
+  instruments come first in the full list, so `-c` numbers match the other
+  tools'. It takes about 2.9 s, most of it the USB scan and the
+  instrument's own initialisation. No tool upstream uses the LED options.
+- `spectro/dispsup.c`: `disprd_read()` (dispcal's and dispread's patch
+  reading) makes the LED pulse while patches are read and puts it back on
+  steadily when they're done, failed or not (`disprd_led()`:
+  `inst_opt_set_led_pulse_state` with a 2 s period, 0.3 on and 0.3 fade,
+  then `inst_opt_set_led_state`). Only instruments with a pulsable LED
+  (`inst_opt_get_pulse_ledmask`: i1Display Pro, Munki, Spyder) are
+  touched. An instrument reopened in the middle of a reading
+  (`disprd_reopen_inst()`) is set pulsing again. Between batches, as in
+  dispcal's calibration loop or a "Check all" adjustment, the light is
+  steady. On the i1Display Pro it shows as brief flashes during readings.
+
 ## Verified (KWin 6.7.5, Sharp 2560x1600 eDP panel, i1Display Pro)
 
 - Patch window: exact size (100 mm -> 699 px at 366 mm / 2560 px), centered,

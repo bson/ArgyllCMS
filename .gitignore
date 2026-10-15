@@ -99,6 +99,7 @@ tmp/
 /spectro/oeminst
 /spectro/spec2cie
 /spectro/spotread
+/spectro/instled
 /spectro/synthcal
 /spectro/synthread
 /spectro/xdg_bds
