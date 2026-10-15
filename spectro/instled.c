@@ -20,6 +20,7 @@
 #include "cgats.h"
 #include "conv.h"
 #include "xicc.h"
+#include "ui.h"
 #include "inst.h"
 #include "icoms.h"
 #include "instappsup.h"
